@@ -80,18 +80,21 @@ Wire the client script into your `public/admin/index.html`:
 
 ## Env vars (Cloudflare Pages → Settings → Environment variables)
 
-All of these need to be set for **both Production and Preview**
-environments unless noted:
+| Var | Environments | Used by | Notes |
+|---|---|---|---|
+| `GITHUB_WEBHOOK_SECRET` | Production only | `github-webhook.js` | Random secret, e.g. `openssl rand -hex 32`. Also configured on the GitHub webhook itself (see below). GitHub only ever calls the production URL, so Preview never needs this. |
+| `GITHUB_STATUS_TOKEN` | Production only | `github-webhook.js` | GitHub PAT scoped to **only** "Commit statuses: Read and write" on the one repo. Deliberately narrow. |
+| `GITHUB_REPO` | Production only | `github-webhook.js` | `"<owner>/<repo>"`. |
+| `CF_PAGES_PROJECT_NAME` | Production only | `github-webhook.js`, `preview-url.js` | The Cloudflare Pages project's own name. Not auto-injected by Cloudflare. |
+| `CF_API_TOKEN` | Production only | `github-webhook.js`, `preview-url.js` | **Recommend a token scoped to only "Cloudflare Pages: Read"**, not a broad account-admin token — that's all this ever needs. |
+| `CF_ACCOUNT_ID` | Production only | `github-webhook.js`, `preview-url.js` | |
+| `PRODUCTION_HOSTNAME` | **Both** Production and Preview | `admin/_middleware.js`, `preview-url.js` | Your production Pages hostname. Blocks `/admin` and `/preview-url` on every other hostname (preview URLs, per-commit URLs). The one var that genuinely needs to exist on Preview too — its whole job is running *there* to detect and block it. Optional: if unset, nothing is blocked (fails open). |
 
-| Var | Used by | Notes |
-|---|---|---|
-| `GITHUB_WEBHOOK_SECRET` | `github-webhook.js` | Random secret, e.g. `openssl rand -hex 32`. Also configured on the GitHub webhook itself (see below). |
-| `GITHUB_STATUS_TOKEN` | `github-webhook.js` | GitHub PAT scoped to **only** "Commit statuses: Read and write" on the one repo. Deliberately narrow. |
-| `GITHUB_REPO` | `github-webhook.js` | `"<owner>/<repo>"`. |
-| `CF_PAGES_PROJECT_NAME` | `github-webhook.js`, `preview-url.js` | The Cloudflare Pages project's own name. Not auto-injected by Cloudflare. |
-| `CF_API_TOKEN` | `github-webhook.js`, `preview-url.js` | **Recommend a token scoped to only "Cloudflare Pages: Read"**, not a broad account-admin token — that's all this ever needs. |
-| `CF_ACCOUNT_ID` | `github-webhook.js`, `preview-url.js` | |
-| `PRODUCTION_HOSTNAME` | `admin/_middleware.js`, `preview-url.js` | Your production Pages hostname. Blocks `/admin` and `/preview-url` on every other hostname (preview URLs, per-commit URLs) — set on **both** environments specifically so it can block on preview URLs at all. Optional: if unset, nothing is blocked (fails open). |
+Why only `PRODUCTION_HOSTNAME` needs both: everything else is only ever
+reached via the production URL in practice — the GitHub webhook always
+calls the one URL configured on it, and `preview-url.js`'s hostname check
+runs *before* it would ever need the other vars, so a preview deployment
+missing them fails safe (blocked by hostname) rather than erroring.
 
 ## GitHub webhook setup (once per repo)
 
