@@ -1,0 +1,22 @@
+{
+  // A plain Cloudflare Worker, deployed via `wrangler deploy` from this
+  // directory -- deliberately NOT git-connected/Workers Builds (a
+  // different, git-connected-Worker product that has had reliability
+  // issues; this simpler mechanism doesn't have those problems). Deploy
+  // manually whenever this changes:
+  //   cd cleanup-worker && wrangler deploy
+  // Secrets (see src/index.js's header comment for the full list) are set
+  // separately, once, via `wrangler secret put <NAME>` or the dashboard --
+  // they are NOT part of this file and are not committed anywhere.
+  "name": "decap-preview-cleanup",
+  "compatibility_date": "2026-08-12",
+  "main": "src/index.js",
+  "triggers": {
+    // Sundays at 06:00 UTC. Cron syntax: minute hour day-of-month month
+    // day-of-week. Named day (SUN) rather than numeric (0) — Cloudflare's
+    // cron validator rejected "0 6 * * 0" outright (code 10100, "invalid
+    // cron string") despite that being valid standard 5-field cron syntax
+    // elsewhere.
+    "crons": ["0 6 * * SUN"]
+  }
+}

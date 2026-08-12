@@ -1,0 +1,19 @@
+{
+  "name": "decap-cloudflare-preview-status",
+  "version": "1.0.0",
+  "description": "Reusable Cloudflare Pages Functions that bridge Decap CMS's editorial_workflow to Cloudflare Pages' real build status: a genuine GitHub commit status (so Decap's own native \"Check for Preview\" UI works), plus an in-admin banner with accurate build timing.",
+  "type": "module",
+  "private": false,
+  "files": [
+    "src",
+    "scripts",
+    "README.md"
+  ],
+  "scripts": {
+    "sync": "node scripts/sync.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/andiapps-dev/decap-cloudflare-preview-status.git"
+  }
+}
