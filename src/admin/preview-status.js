@@ -154,19 +154,34 @@
     }
   }
 
+  // Baselines captured in `preSave` (see below), keyed by branch, and
+  // consumed once by the matching `postSave` handler.
+  //
+  // Bug found on a fast-building project (real build finished in ~23s):
+  // capturing the baseline in `postSave` — as an earlier version of this
+  // file did — is a genuine race, not just theoretically. `postSave` only
+  // fires *after* Decap has already created the branch, committed the
+  // file, and opened the PR — all of which is what triggers Cloudflare's
+  // build in the first place. On a slow-enough build there's always been
+  // time for the `postSave` baseline fetch to run before Cloudflare's own
+  // deployment record appears, so this never surfaced. On a fast build, the
+  // baseline fetch can lose that race and capture the *new* deployment as
+  // its own baseline — after which every poll asks for something "strictly
+  // newer than baseline" that will never exist, and the whole 2-minute
+  // poll silently burns down to "Still building… check GitHub directly"
+  // even though the real build already succeeded, often in seconds.
+  // `preSave` fires before Decap does anything — the branch/commit/PR (and
+  // therefore any Cloudflare build) cannot possibly exist yet when this
+  // runs, so capturing the baseline here is race-proof regardless of how
+  // fast the build turns out to be.
+  const pendingBaselines = new Map();
+
   if (window.CMS && typeof window.CMS.registerEventListener === 'function') {
     window.CMS.registerEventListener({
-      name: 'postSave',
+      name: 'preSave',
       handler: async ({ entry }) => {
         const branch = branchForEntry(entry);
         if (!branch) return;
-        const myGeneration = ++generation;
-        const startedAt = timestamp();
-        showNotice('Building deploy preview…', null, `Started ${startedAt} — typically takes 1-2 min total.`);
-        // Capture whatever deployment currently exists for this branch
-        // *before* waiting for a new one — this is the baseline every
-        // subsequent poll excludes, so "ready" only fires for a build
-        // that's genuinely new relative to the moment this Save happened.
         let baselineId = null;
         try {
           const baseline = await fetchDeployment(branch);
@@ -176,7 +191,38 @@
           // transient fetch error) — fine, exclude_id=null just means
           // "accept whatever's newest", same as before this feature.
         }
-        if (myGeneration !== generation) return; // another Save happened while awaiting the baseline
+        pendingBaselines.set(branch, baselineId);
+        // Deliberately returns undefined (no return statement at all) —
+        // NOT `entry`. Decap's own preSave handling
+        // (invokeEventWithEntry -> Er in decap-cms-core) treats a
+        // preSave handler's return value, if not `undefined`, as the
+        // entry's new `data` field via `entry.set("data", returnValue)` —
+        // confirmed directly against decap-cms-core's bundled source, not
+        // assumed. Returning the whole `entry` object here (an earlier
+        // draft of this fix did exactly that) would have nested the
+        // entire entry inside its own `data` field on every single Save,
+        // silently corrupting saved content. This handler only observes
+        // the entry for a side effect (capturing the baseline) and must
+        // never modify it, so `undefined` — "leave the entry exactly as
+        // it is" — is the only correct return value.
+      },
+    });
+
+    window.CMS.registerEventListener({
+      name: 'postSave',
+      handler: async ({ entry }) => {
+        const branch = branchForEntry(entry);
+        if (!branch) return;
+        const myGeneration = ++generation;
+        const startedAt = timestamp();
+        showNotice('Building deploy preview…', null, `Started ${startedAt} — typically takes 1-2 min total.`);
+        // Consume the baseline preSave captured for this exact branch. If
+        // for some reason none exists (e.g. preSave didn't fire — older
+        // Decap version, or this save raced a page load), fall back to
+        // null: "accept whatever's newest" is a safe degradation, just
+        // without the same race protection.
+        const baselineId = pendingBaselines.has(branch) ? pendingBaselines.get(branch) : null;
+        pendingBaselines.delete(branch);
         pollUntilReady(branch, baselineId, myGeneration, 0, startedAt);
       },
     });

@@ -139,6 +139,29 @@ documented inline at the point it was fixed, but listed here as a map:
    which Save it was actually about. Fixed with a generation counter: each
    loop is stamped at creation and checks it's still current before ever
    showing a result.
+6. **Baseline captured too late — a real race, not just theoretical.**
+   Earlier versions captured the "baseline" deployment (the one every poll
+   needs to see something strictly newer than) inside the `postSave`
+   handler. `postSave` only fires *after* Decap has already created the
+   branch, committed the file, and opened the PR — exactly what triggers
+   Cloudflare's build. On a slow-enough build there's always been time for
+   the baseline fetch to run before Cloudflare's own deployment record
+   appeared, so this never surfaced in testing. On a project whose build
+   finished in ~23 seconds, the baseline fetch lost the race and captured
+   the *new* deployment as its own baseline — so every subsequent poll
+   asked for something "strictly newer than baseline" that would never
+   exist, and the UI reported "Still building… check GitHub directly"
+   after the full 2-minute timeout even though the real build had already
+   succeeded in well under a minute. Fixed by capturing the baseline in a
+   `preSave` handler instead — it fires before Decap does anything, so no
+   branch/PR/build can possibly exist yet when it runs, regardless of how
+   fast the actual build turns out to be. (One subtlety worth recording:
+   `preSave`'s return value, if not `undefined`, gets grafted into the
+   entry's own `data` field by Decap's own event-processing code — a
+   `preSave` handler that only wants to observe the entry, not modify it,
+   must return nothing at all. Confirmed directly against decap-cms-core's
+   bundled source rather than assumed, after nearly shipping a version
+   that returned the whole entry and would have corrupted every save.)
 
 Also worth knowing, not a bug in this code but a real characteristic of
 the platform: **even after `deploy/success`, the branch alias URL can take

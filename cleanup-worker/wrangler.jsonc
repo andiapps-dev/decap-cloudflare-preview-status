@@ -18,5 +18,26 @@
     // cron string") despite that being valid standard 5-field cron syntax
     // elsewhere.
     "crons": ["0 6 * * SUN"]
+  },
+  // One codebase, one place to fix bugs (npm-update-style consistency),
+  // but each project gets its own isolated Worker + secrets — deliberately
+  // NOT one shared running instance across projects. `CF_API_TOKEN` here
+  // needs Edit (not just Read) to delete deployments, and `GITHUB_TOKEN`
+  // needs repo read access; a single shared Worker would put every
+  // project's credentials at risk from one leak/misconfiguration. Deploy
+  // with `wrangler deploy --env <name>` — Cloudflare deploys each env
+  // block as a fully separate Worker named `<name>-<env>` (confirmed via
+  // Cloudflare's own docs: "Cloudflare effectively creates a new Worker
+  // with the name `<top-level-name>-<environment-name>`"), so this can
+  // never collide with or overwrite the top-level Worker above.
+  "env": {
+    "capitaledge": {
+      "triggers": {
+        // One hour offset from the top-level (djvrx) schedule — no real
+        // requirement to stagger, just avoids both running at the exact
+        // same instant for no reason.
+        "crons": ["0 7 * * SUN"]
+      }
+    }
   }
 }
