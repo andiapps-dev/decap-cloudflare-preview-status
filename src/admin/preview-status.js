@@ -31,7 +31,7 @@
   }
 
   function timestamp() {
-    return new Date().toLocaleTimeString([], { hour12: false });
+    return new Date().toLocaleTimeString([], { hour12: true });
   }
 
   // Full-width bar fixed to the very top of the viewport — Decap's own
