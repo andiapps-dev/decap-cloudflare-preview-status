@@ -17,6 +17,17 @@
 // about giving /admin itself a clean 404 instead of a half-working page
 // on the wrong hostname.
 //
+// The 404 response body is deliberately generic -- indistinguishable from
+// a plain "this path doesn't exist" 404, with no mention of /admin or the
+// production hostname. An earlier version's body read "/admin is only
+// available at https://<production-hostname> -- not on preview or
+// per-commit URLs", which correctly blocked access but handed anyone who
+// found a preview/per-commit URL a confirmation that /admin exists here
+// AND the exact hostname to go try it on -- worse than saying nothing.
+// The *.pages.dev preview/per-commit URLs aren't meant to be discoverable
+// at all, so the response gives no sign there's anything special at this
+// path.
+//
 // Reusable as-is for any project -- the only project-specific bit is the
 // PRODUCTION_HOSTNAME env var itself.
 //
@@ -38,10 +49,7 @@ export async function onRequest(context) {
   }
 
   if (hostname !== env.PRODUCTION_HOSTNAME) {
-    return new Response(
-      `/admin is only available at https://${env.PRODUCTION_HOSTNAME} -- not on preview or per-commit URLs.`,
-      { status: 404 }
-    );
+    return new Response("404 Not Found", { status: 404 });
   }
 
   return next();

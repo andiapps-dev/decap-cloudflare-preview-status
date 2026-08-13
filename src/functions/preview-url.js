@@ -30,11 +30,12 @@ export async function onRequestGet({ request, env }) {
   // not something requiring a login), so restricting it to the one
   // hostname it's actually used from is real, if modest, defense in
   // depth rather than leaving it answerable from every preview URL too.
+  // Response body is a plain 404, not JSON explaining why -- same
+  // reasoning as admin/_middleware.js: preview/per-commit *.pages.dev
+  // URLs aren't meant to be discoverable, so this shouldn't confirm that
+  // anything meaningful lives at this path either.
   if (env.PRODUCTION_HOSTNAME && new URL(request.url).hostname !== env.PRODUCTION_HOSTNAME) {
-    return new Response(JSON.stringify({ error: 'not available on this hostname' }), {
-      status: 404,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return new Response("404 Not Found", { status: 404 });
   }
 
   if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID || !env.CF_PAGES_PROJECT_NAME) {
