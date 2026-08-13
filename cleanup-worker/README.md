@@ -1,14 +1,26 @@
 # decap-preview-cleanup (Worker)
 
-Deletes orphaned Cloudflare Pages **preview** deployments — every Decap
-editorial-workflow Save creates one, and while Decap cleans up the GitHub
-side nicely on its own (deletes the branch, closes the PR, both on Delete
-and on Publish), Cloudflare never deletes the deployment itself. This
-Worker runs weekly, compares current GitHub branches against current
-Cloudflare preview deployments, and deletes anything whose branch is gone
-— with a 24-hour grace period on anything too new, and production
-deployments excluded by construction (only ever queries `env=preview`,
-plus an explicit `branch === 'main'` refusal as belt-and-suspenders).
+Deletes Cloudflare Pages deployments that have been superseded, so they
+don't pile up forever — every Decap editorial-workflow Save creates a new
+**preview** deployment, and every merge to `main` creates a new
+**production** one, and Cloudflare never deletes any of them on its own.
+This Worker runs weekly and cleans up both:
+
+- **Preview**: for each branch that still exists on GitHub, keeps only
+  its single newest deployment and deletes older, superseded ones (a
+  branch with several Saves otherwise accumulates a deployment per Save,
+  forever). For a branch that's gone entirely (Decap deletes the branch +
+  closes the PR on both Delete and Publish), deletes **every** deployment
+  for it — there's nothing left to preview.
+- **Production**: keeps only the single newest deployment, deletes
+  everything older. Cloudflare always serves live traffic from the newest
+  one via the stable domain alias, so older ones are pure history — not
+  anything currently reachable. (Deleting them does give up Cloudflare's
+  own one-click "rollback to a previous deployment" from the dashboard;
+  a revert is still just a normal `git revert` + push away.)
+
+Both respect the same 24-hour grace period on anything too new, with the
+same manual `ignoreGracePeriod` override described below applying to both.
 
 This is a **Worker**, not part of the Pages project's `functions/` — Pages
 has no scheduled-execution mechanism of its own; Cron Triggers are a
@@ -42,11 +54,13 @@ wrangler secret put MANUAL_TRIGGER_TOKEN    # random secret, e.g. `openssl rand 
 curl "https://decap-preview-cleanup.<your-subdomain>.workers.dev/?token=<MANUAL_TRIGGER_TOKEN>"
 ```
 
-Returns JSON: what was checked, what was deleted, and why everything else
-was skipped (branch still exists / within grace period / production
-branch / no branch metadata). Same code path the weekly cron runs — this
-is a real trigger, not a dry run, so it will actually delete anything that
-qualifies.
+Returns JSON: what was checked, what was deleted (each entry tagged
+`env: 'preview'` or `env: 'production'`, plus `branch` for preview
+entries), and why everything else was skipped (latest in its group,
+keeping / within grace period / production branch, refusing to touch / no
+branch metadata / delete request failed). Same code path the weekly cron
+runs — this is a real trigger, not a dry run, so it will actually delete
+anything that qualifies.
 
 The scheduled run's own output is only visible in the dashboard's Worker
 Logs (or `wrangler tail` while it's running) — cron triggers have no HTTP

@@ -7,13 +7,26 @@
 // integration/Workers Builds involved at all — a different, much simpler
 // mechanism than the one that had real bugs elsewhere in this project).
 //
-// What it does: every Decap editorial-workflow Save creates a Cloudflare
-// Pages Preview deployment. Decap cleans up the GitHub side nicely on its
-// own (deletes the branch + closes the PR on both Delete and Publish —
-// confirmed directly), but Cloudflare never deletes the preview
-// deployment itself, so these accumulate forever. Weekly, this lists
-// current GitHub branches and current Cloudflare preview deployments, and
-// deletes any deployment whose branch no longer exists.
+// What it does, weekly:
+//   Preview: every Decap editorial-workflow Save creates a Cloudflare
+//     Pages Preview deployment. Decap cleans up the GitHub side nicely on
+//     its own (deletes the branch + closes the PR on both Delete and
+//     Publish — confirmed directly), but Cloudflare never deletes the
+//     preview deployment itself. For each branch that still exists, keeps
+//     only its single newest deployment and deletes the older, superseded
+//     ones (multiple saves on the same still-open branch otherwise pile
+//     up indefinitely). For a branch that no longer exists at all, deletes
+//     EVERY deployment for it — there's nothing left to preview.
+//   Production: keeps only the single newest production deployment and
+//     deletes everything older. Cloudflare always serves live production
+//     traffic from the newest one via the stable domain alias, so older
+//     ones are pure history/rollback material, not anything currently
+//     reachable — deleting them does lose Cloudflare's own one-click
+//     "rollback to a previous deployment" from the dashboard, though; a
+//     revert is still just a normal `git revert` + push away.
+// Both respect the same 24h grace period (skip anything newer than that),
+// bypassable via `ignoreGracePeriod` on the manual trigger only — the
+// scheduled weekly run never bypasses it.
 //
 // Needs six secrets (wrangler secret put, or dashboard -> Settings ->
 // Variables and Secrets on the Worker itself — note this is a Worker, so
@@ -60,12 +73,14 @@ async function listGithubBranches(env) {
   return branches;
 }
 
-async function listPreviewDeployments(env) {
+// `cfEnv` is Cloudflare's own deployment environment filter ("preview" or
+// "production"), not this Worker's env bindings object.
+async function listDeployments(env, cfEnv) {
   const deployments = [];
   let page = 1;
   for (;;) {
     const res = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/pages/projects/${env.CF_PAGES_PROJECT_NAME}/deployments?env=preview&page=${page}&per_page=25`,
+      `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/pages/projects/${env.CF_PAGES_PROJECT_NAME}/deployments?env=${cfEnv}&page=${page}&per_page=25`,
       { headers: { Authorization: `Bearer ${env.CF_API_TOKEN}` } }
     );
     if (!res.ok) throw new Error(`Cloudflare deployments API returned ${res.status}: ${await res.text()}`);
@@ -88,49 +103,110 @@ async function deleteDeployment(env, id) {
   return res.ok;
 }
 
+// Given one logical group of deployments (e.g. one branch's preview
+// deployments, or all production deployments), decides which are safe to
+// delete: newest-first, keep exactly one (unless `alwaysDeleteAll`, used
+// for a preview branch that no longer exists at all -- nothing left to
+// keep a "latest" of), and apply the grace period to every candidate.
+// Doesn't call the Cloudflare API itself -- just returns the plan, so the
+// caller can log/attribute results consistently between the preview
+// (per-branch) and production (single group) cases without duplicating
+// this logic twice.
+function planGroup(deps, { now, ignoreGracePeriod, alwaysDeleteAll, extra }) {
+  const toDelete = [];
+  const toSkip = [];
+
+  const sorted = [...deps].sort((a, b) => new Date(b.created_on).getTime() - new Date(a.created_on).getTime());
+  const candidates = alwaysDeleteAll ? sorted : sorted.slice(1);
+
+  if (!alwaysDeleteAll && sorted.length > 0) {
+    toSkip.push({ id: sorted[0].id, ...extra, reason: 'latest in its group, keeping' });
+  }
+
+  for (const dep of candidates) {
+    const age = now - new Date(dep.created_on).getTime();
+    if (!ignoreGracePeriod && age < GRACE_PERIOD_MS) {
+      toSkip.push({ id: dep.id, ...extra, reason: 'within grace period' });
+    } else {
+      toDelete.push(dep);
+    }
+  }
+
+  return { toDelete, toSkip };
+}
+
 async function runCleanup(env, { ignoreGracePeriod = false } = {}) {
   const branches = await listGithubBranches(env);
-  const deployments = await listPreviewDeployments(env);
+  const previewDeployments = await listDeployments(env, 'preview');
+  const productionDeployments = await listDeployments(env, 'production');
   const now = Date.now();
 
   const deleted = [];
   const skipped = [];
 
-  for (const dep of deployments) {
+  // --- Preview: group by branch first. ---
+  const byBranch = new Map();
+  for (const dep of previewDeployments) {
     const branch = dep.deployment_trigger?.metadata?.branch;
-
     if (!branch) {
-      skipped.push({ id: dep.id, reason: 'no branch metadata' });
+      skipped.push({ id: dep.id, env: 'preview', reason: 'no branch metadata' });
       continue;
     }
     // Belt-and-suspenders: never touch the production branch, even though
     // querying env=preview should already exclude it entirely.
     if (branch === 'main' || branch === 'master') {
-      skipped.push({ id: dep.id, branch, reason: 'production branch, refusing to touch' });
+      skipped.push({ id: dep.id, env: 'preview', branch, reason: 'production branch, refusing to touch' });
       continue;
     }
-    if (branches.has(branch)) {
-      skipped.push({ id: dep.id, branch, reason: 'branch still exists' });
-      continue;
-    }
-    const age = now - new Date(dep.created_on).getTime();
-    if (!ignoreGracePeriod && age < GRACE_PERIOD_MS) {
-      skipped.push({ id: dep.id, branch, reason: 'within grace period' });
-      continue;
-    }
+    if (!byBranch.has(branch)) byBranch.set(branch, []);
+    byBranch.get(branch).push(dep);
+  }
 
-    const ok = await deleteDeployment(env, dep.id);
-    if (ok) {
-      deleted.push({ id: dep.id, branch, created_on: dep.created_on });
-    } else {
-      skipped.push({ id: dep.id, branch, reason: 'delete request failed' });
+  for (const [branch, deps] of byBranch) {
+    const branchStillExists = branches.has(branch);
+    const { toDelete, toSkip } = planGroup(deps, {
+      now,
+      ignoreGracePeriod,
+      // A gone branch has nothing left to keep a "latest preview" of --
+      // every deployment for it is a delete candidate, not just the
+      // older ones.
+      alwaysDeleteAll: !branchStillExists,
+      extra: { env: 'preview', branch },
+    });
+    skipped.push(...toSkip);
+    for (const dep of toDelete) {
+      const ok = await deleteDeployment(env, dep.id);
+      if (ok) {
+        deleted.push({ id: dep.id, env: 'preview', branch, created_on: dep.created_on });
+      } else {
+        skipped.push({ id: dep.id, env: 'preview', branch, reason: 'delete request failed' });
+      }
+    }
+  }
+
+  // --- Production: one group, no branch concept -- keep only the newest. ---
+  {
+    const { toDelete, toSkip } = planGroup(productionDeployments, {
+      now,
+      ignoreGracePeriod,
+      alwaysDeleteAll: false,
+      extra: { env: 'production' },
+    });
+    skipped.push(...toSkip);
+    for (const dep of toDelete) {
+      const ok = await deleteDeployment(env, dep.id);
+      if (ok) {
+        deleted.push({ id: dep.id, env: 'production', created_on: dep.created_on });
+      } else {
+        skipped.push({ id: dep.id, env: 'production', reason: 'delete request failed' });
+      }
     }
   }
 
   return {
     ranAt: new Date().toISOString(),
     branchesOnGithub: branches.size,
-    deploymentsChecked: deployments.length,
+    deploymentsChecked: previewDeployments.length + productionDeployments.length,
     deleted,
     skippedCount: skipped.length,
     skipped,

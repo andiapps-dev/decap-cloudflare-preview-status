@@ -6,9 +6,10 @@ Preview" UI, and a prominent in-admin banner.
 
 Also includes [`cleanup-worker/`](./cleanup-worker), a small, separately
 deployed Cloudflare Worker (Cron Trigger, not part of the Pages project)
-that periodically deletes orphaned preview deployments — every Save
-creates one, and Cloudflare never cleans them up on its own even after
-Decap deletes the branch.
+that periodically deletes superseded preview and production
+deployments — every Save creates a new preview deployment, every merge to
+`main` creates a new production one, and Cloudflare never cleans up either
+on its own.
 
 ## Prerequisites
 
