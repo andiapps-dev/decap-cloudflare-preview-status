@@ -252,4 +252,71 @@
       }
     })
     .catch(() => {});
+
+  // Small, persistent GitHub/Cloudflare status indicator, bottom-right —
+  // deliberately separate from showNotice()'s banners above (those are
+  // transient, dismissible, about THIS admin's own build status; this is
+  // a standing "are the two services everything here depends on
+  // currently healthy" check, useful on its own even with nothing being
+  // saved right now). Both status pages are the real, public Atlassian
+  // Statuspage JSON APIs GitHub/Cloudflare themselves publish (confirmed
+  // directly: both send Access-Control-Allow-Origin: *, meaning they're
+  // deliberately meant to be fetched client-side like this, not just
+  // viewed in a browser tab) — no token, no server-side Function, no new
+  // secret of any kind needed for this.
+  const STATUS_ENDPOINTS = [
+    { label: 'GitHub', url: 'https://www.githubstatus.com/api/v2/status.json' },
+    { label: 'Cloudflare', url: 'https://www.cloudflarestatus.com/api/v2/status.json' },
+  ];
+  const STATUS_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+
+  function statusIcon(indicator) {
+    // Atlassian Statuspage's own indicator values, every product using
+    // it (GitHub, Cloudflare, many others) reports one of exactly these
+    // four: https://status.io / statuspage.io's documented set.
+    if (indicator === 'none') return '✅';
+    if (indicator === 'minor') return '⚠️';
+    if (indicator === 'major' || indicator === 'critical') return '❌';
+    return '❔'; // unrecognized value — degrade visibly rather than guess
+  }
+
+  async function checkServiceStatus() {
+    const results = await Promise.all(
+      STATUS_ENDPOINTS.map(async ({ label, url }) => {
+        try {
+          const res = await fetch(url, { cache: 'no-store' });
+          const data = await res.json();
+          return { label, icon: statusIcon(data.status.indicator), text: data.status.description };
+        } catch (e) {
+          // A failed check is NOT the same as a confirmed outage — show
+          // a distinct "couldn't check" state rather than a false-clean
+          // green or an alarmist red for what might just be this
+          // browser's own network hiccup.
+          return { label, icon: '❔', text: 'Could not check' };
+        }
+      })
+    );
+
+    let widget = document.getElementById('service-status-widget');
+    if (!widget) {
+      widget = document.createElement('div');
+      widget.id = 'service-status-widget';
+      widget.style.cssText =
+        'position:fixed;bottom:12px;right:12px;z-index:9998;' +
+        'background:#1a1a1a;color:#fff;padding:8px 12px;border-radius:6px;' +
+        'font:12px -apple-system,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.3);' +
+        'display:flex;flex-direction:column;gap:4px;';
+      document.body.appendChild(widget);
+    }
+    widget.innerHTML = '';
+    results.forEach(({ label, icon, text }) => {
+      const row = document.createElement('div');
+      row.textContent = `${icon} ${label}: ${text}`;
+      row.title = `${label} status, checked ${timestamp()}`;
+      widget.appendChild(row);
+    });
+  }
+
+  checkServiceStatus();
+  setInterval(checkServiceStatus, STATUS_CHECK_INTERVAL_MS);
 })();

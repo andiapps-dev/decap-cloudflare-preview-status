@@ -182,6 +182,26 @@ it's inspectable — delete it manually via GitHub once resolved; a future
 `cleanup-worker` enhancement could target `bulk-publish-*` branches, but
 doesn't yet.
 
+## GitHub/Cloudflare status widget
+
+`public/admin/preview-status.js` also shows a small, persistent indicator
+in the bottom-right corner of every `/admin` page — GitHub's and
+Cloudflare's own current status (✅ operational, ⚠️ minor/major incident,
+❌ critical, ❔ couldn't check), checked once on page load and every 15
+minutes after. Both use the real, public [Atlassian Statuspage
+API](https://www.atlassian.com/software/statuspage) GitHub and Cloudflare
+each publish (`githubstatus.com`/`cloudflarestatus.com`'s own
+`/api/v2/status.json`) — confirmed directly that both send
+`Access-Control-Allow-Origin: *`, i.e. they're deliberately meant to be
+fetched client-side like this. No token, no server-side Function, no new
+env var of any kind — this is the simplest piece of the whole package.
+
+Useful on its own (a quick "is it them or is it me" check when something
+seems broken) and specifically relevant to Bulk Publish above: if GitHub
+or Cloudflare is degraded, that's worth knowing before enabling Bulk Mode
+or trying to combine-and-publish, since the whole feature depends on both
+being reachable and behaving normally.
+
 ## Bugs found building this (why the code looks the way it does)
 
 Five distinct, real bugs surfaced during development — each one is
