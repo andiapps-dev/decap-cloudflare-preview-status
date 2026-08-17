@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <title>Bulk Publish — Content Admin</title>
+</head>
+<body>
+  <div id="bulk-publish-root"></div>
+
+  <script>
+    // Standalone, zero-framework page -- deliberately NOT injected into
+    // Decap's own /admin React UI (no supported extension point exists
+    // for adding a button/panel to Decap's own screens; preview-status.js
+    // deliberately only ever adds an overlay banner on top, never touches
+    // Decap's own DOM tree, for the same reason). This page reuses the
+    // already-logged-in editor's own GitHub token instead of running its
+    // own login flow -- see getToken() below.
+    (function () {
+      const root = document.getElementById('bulk-publish-root');
+
+      function el(tag, attrs, children) {
+        const node = document.createElement(tag);
+        if (attrs) {
+          for (const [k, v] of Object.entries(attrs)) {
+            if (k === 'style') node.style.cssText = v;
+            else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+            else node.setAttribute(k, v);
+          }
+        }
+        (children || []).forEach((c) => node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+        return node;
+      }
+
+      // Decap CMS persists the OAuth token it obtained via
+      // functions/auth.js/callback.js into localStorage under the key
+      // decap-cms-user, for its own session-reuse purposes. This key and
+      // its shape are Decap's own internal, UNDOCUMENTED storage format
+      // (not vendored/pinned in the consuming repo -- Decap loads from
+      // unpkg.com's CDN, not npm), observed rather than guaranteed stable
+      // across Decap versions. Degrading to "treat as not logged in"
+      // rather than throwing on any parse surprise is deliberate, not an
+      // oversight -- a future Decap upgrade changing this shape should
+      // fail safe here, not break this page outright.
+      function getToken() {
+        try {
+          const raw = localStorage.getItem('decap-cms-user');
+          if (!raw) return null;
+          const parsed = JSON.parse(raw);
+          return parsed && parsed.token ? parsed.token : null;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function relativeTime(iso) {
+        const diffMs = Date.now() - new Date(iso).getTime();
+        const mins = Math.round(diffMs / 60000);
+        if (mins < 1) return 'just now';
+        if (mins < 60) return `${mins}m ago`;
+        const hours = Math.round(mins / 60);
+        if (hours < 24) return `${hours}h ago`;
+        return `${Math.round(hours / 24)}d ago`;
+      }
+
+      async function api(action, body) {
+        const token = getToken();
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const res = await fetch('/admin/bulk-publish', {
+          method: action ? 'POST' : 'GET',
+          headers,
+          body: action ? JSON.stringify(Object.assign({ action }, body)) : undefined,
+        });
+        const data = await res.json();
+        return { ok: res.ok, status: res.status, data };
+      }
+
+      function renderLoggedOut() {
+        root.innerHTML = '';
+        root.appendChild(
+          el('div', { style: 'font:14px -apple-system,sans-serif;padding:24px;max-width:520px;' }, [
+            el('p', {}, ['You need to be logged into /admin first — this page reuses that session.']),
+            el('a', { href: '/admin' }, ['Go to /admin →']),
+          ])
+        );
+      }
+
+      function renderError(message) {
+        const banner = document.getElementById('bulk-publish-error');
+        if (banner) banner.remove();
+        root.prepend(
+          el(
+            'div',
+            {
+              id: 'bulk-publish-error',
+              style:
+                'background:#4a1414;color:#ffb4b4;padding:12px 16px;font:14px -apple-system,sans-serif;' +
+                'border-radius:4px;margin-bottom:16px;white-space:pre-wrap;',
+            },
+            [message]
+          )
+        );
+      }
+
+      function renderOff() {
+        root.innerHTML = '';
+        root.appendChild(
+          el('div', { style: 'font:14px -apple-system,sans-serif;padding:24px;max-width:520px;' }, [
+            el('h1', { style: 'font-size:18px;margin:0 0 12px;' }, ['Bulk Publish']),
+            el('p', { style: 'color:#666;' }, [
+              'Enable Bulk Mode to make several edits without triggering a build for each one. ',
+              'While it’s on, no preview or production build fires for anything — not just what you edit here, but every Save from anyone. ',
+              'When you’re done, come back here to combine and publish everything at once.',
+            ]),
+            el(
+              'button',
+              {
+                style:
+                  'background:#1a1a1a;color:#fff;border:none;padding:10px 18px;border-radius:4px;' +
+                  'font-size:14px;cursor:pointer;',
+                onclick: async (e) => {
+                  e.target.disabled = true;
+                  e.target.textContent = 'Enabling…';
+                  const { ok, data } = await api('enable');
+                  if (!ok) {
+                    e.target.disabled = false;
+                    e.target.textContent = 'Enable Bulk Mode';
+                    renderError(data.error || 'failed to enable bulk mode');
+                    return;
+                  }
+                  load();
+                },
+              },
+              ['Enable Bulk Mode']
+            ),
+          ])
+        );
+      }
+
+      function renderOn(repo, prs) {
+        root.innerHTML = '';
+
+        const banner = el(
+          'div',
+          {
+            style:
+              'background:#1a1a1a;color:#fff;padding:10px 16px;border-radius:4px;font:14px -apple-system,sans-serif;' +
+              'margin-bottom:16px;',
+          },
+          ['Bulk Mode is ON — builds are suspended until you publish or turn it off.']
+        );
+
+        const container = el('div', { style: 'font:14px -apple-system,sans-serif;padding:24px;max-width:640px;' });
+        container.appendChild(banner);
+        container.appendChild(el('h1', { style: 'font-size:18px;margin:0 0 12px;' }, ['Bulk Publish']));
+
+        if (prs.length === 0) {
+          container.appendChild(
+            el('p', { style: 'color:#666;' }, [
+              'No open cms/* PRs right now. Make some edits in ',
+              el('a', { href: '/admin' }, ['/admin']),
+              ', then come back here.',
+            ])
+          );
+        }
+
+        const checkboxes = [];
+        prs.forEach((pr) => {
+          const checkbox = el('input', { type: 'checkbox', value: pr.branch });
+          checkboxes.push(checkbox);
+          const row = el(
+            'label',
+            {
+              style:
+                'display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #eee;',
+            },
+            [
+              checkbox,
+              el('span', { style: 'flex:1;' }, [pr.title]),
+              el('code', { style: 'color:#888;font-size:12px;' }, [pr.branch]),
+              el('span', { style: 'color:#999;font-size:12px;white-space:nowrap;' }, [
+                `${pr.author || 'unknown'} · ${relativeTime(pr.updatedAt)}`,
+              ]),
+            ]
+          );
+          container.appendChild(row);
+        });
+
+        const publishBtn = el(
+          'button',
+          {
+            style:
+              'background:#1a1a1a;color:#fff;border:none;padding:10px 18px;border-radius:4px;' +
+              'font-size:14px;cursor:pointer;margin-top:16px;margin-right:10px;opacity:0.5;',
+            disabled: 'true',
+          },
+          ['Combine, Publish & Turn Off Bulk Mode']
+        );
+
+        function refreshPublishState() {
+          const anyChecked = checkboxes.some((c) => c.checked);
+          publishBtn.disabled = !anyChecked;
+          publishBtn.style.opacity = anyChecked ? '1' : '0.5';
+        }
+        checkboxes.forEach((c) => c.addEventListener('change', refreshPublishState));
+
+        publishBtn.addEventListener('click', async () => {
+          const selected = checkboxes.filter((c) => c.checked).map((c) => c.value);
+          if (selected.length === 0) return;
+          // This triggers a real production build and turns bulk mode
+          // back off -- not meant to be a casual click, same reasoning
+          // as the cleanup worker's grace period + manual-trigger gate.
+          const confirmed = confirm(`Combine and publish ${selected.length} entr${selected.length === 1 ? 'y' : 'ies'}? This will trigger one production build.`);
+          if (!confirmed) return;
+
+          publishBtn.disabled = true;
+          publishBtn.textContent = 'Publishing…';
+          const { ok, data } = await api('disable-and-publish', { branches: selected });
+
+          if (!ok) {
+            let msg = data.error || 'publish failed';
+            if (data.conflictedBranch) msg += `\nConflicted branch: ${data.conflictedBranch}`;
+            if (data.scratchBranch) msg += `\nScratch branch (left in place): ${data.scratchBranch}`;
+            if (data.alreadyMerged && data.alreadyMerged.length) msg += `\nAlready merged before the failure: ${data.alreadyMerged.join(', ')}`;
+            msg += '\n\nBulk Mode is still ON.';
+            renderError(msg);
+            publishBtn.disabled = false;
+            publishBtn.textContent = 'Combine, Publish & Turn Off Bulk Mode';
+            return;
+          }
+
+          root.innerHTML = '';
+          root.appendChild(
+            el('div', { style: 'font:14px -apple-system,sans-serif;padding:24px;max-width:640px;' }, [
+              el('h1', { style: 'font-size:18px;margin:0 0 12px;' }, ['Published']),
+              el('p', {}, [`Combined and published ${data.published.length} entr${data.published.length === 1 ? 'y' : 'ies'}: ${data.published.join(', ')}`]),
+              el('p', {}, [
+                'Commit: ',
+                el('a', { href: `https://github.com/${repo}/commit/${data.mainMergeSha}`, target: '_blank', rel: 'noopener noreferrer' }, [data.mainMergeSha]),
+              ]),
+              el('p', { style: 'color:#666;' }, ['Bulk Mode is back off — normal preview builds resume for future edits.']),
+              (data.warnings && data.warnings.length
+                ? el('p', { style: 'color:#a66;' }, [`Warnings: ${data.warnings.join('; ')}`])
+                : el('span', {}, [])),
+            ])
+          );
+        });
+
+        const cancelBtn = el(
+          'button',
+          {
+            style:
+              'background:none;color:#666;border:1px solid #ccc;padding:10px 18px;border-radius:4px;' +
+              'font-size:14px;cursor:pointer;margin-top:16px;',
+            onclick: async (e) => {
+              e.target.disabled = true;
+              const { ok, data } = await api('disable-and-publish', { branches: [] });
+              if (!ok) {
+                e.target.disabled = false;
+                renderError(data.error || 'failed to turn off bulk mode');
+                return;
+              }
+              load();
+            },
+          },
+          ['Turn Off Bulk Mode (don’t publish anything)']
+        );
+
+        container.appendChild(publishBtn);
+        container.appendChild(cancelBtn);
+        root.appendChild(container);
+      }
+
+      async function load() {
+        root.innerHTML = '<div style="font:14px -apple-system,sans-serif;padding:24px;">Loading…</div>';
+
+        if (!getToken()) {
+          renderLoggedOut();
+          return;
+        }
+
+        const { ok, data } = await api(null);
+        if (!ok) {
+          renderError(data.error || 'failed to load bulk publish state');
+          return;
+        }
+
+        if (data.bulkModeOn) {
+          renderOn(data.repo, data.prs || []);
+        } else {
+          renderOff();
+        }
+      }
+
+      load();
+    })();
+  </script>
+</body>
+</html>

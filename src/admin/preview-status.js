@@ -227,4 +227,29 @@
       },
     });
   }
+
+  // Bulk Publish (functions/admin/bulk-publish.js) can suspend preview
+  // builds project-wide while "Bulk Mode" is on -- if an editor enables
+  // it and never comes back to publish/disable it, every future Save
+  // from ANYONE, not just that editor, silently stops getting preview
+  // builds until someone notices. This is a cheap, separate check (not
+  // tied to any Save) so that risk is visible to every editor on every
+  // /admin page load, not just whoever happens to visit the bulk-publish
+  // page itself. A failure here (e.g. the endpoint 500s because
+  // CF_PAGES_EDIT_TOKEN isn't configured yet) is silently ignored --
+  // this is a convenience banner, not a load-bearing check, and
+  // shouldn't itself become a source of noisy errors on every admin page
+  // load for a project that hasn't set up Bulk Publish's env vars at all.
+  fetch('/admin/bulk-publish', { cache: 'no-store' })
+    .then((res) => res.json())
+    .then((data) => {
+      if (data.bulkModeOn) {
+        showNotice(
+          '⚠️ Bulk Mode is ON',
+          null,
+          'No Save — this one or anyone else’s — will get a preview build until it’s turned off from /admin/bulk-publish.html.'
+        );
+      }
+    })
+    .catch(() => {});
 })();

@@ -11,6 +11,12 @@ deployments — every Save creates a new preview deployment, every merge to
 `main` creates a new production one, and Cloudflare never cleans up either
 on its own.
 
+Also includes **Bulk Publish** (`/admin/bulk-publish.html`) — lets an
+editor combine several currently-open `cms/*` PRs into a single merge to
+`main`, producing exactly one production build instead of one per entry,
+and optionally suspends Cloudflare's preview builds entirely while a
+batch of edits is in progress. See "Bulk Publish" below.
+
 ## Prerequisites
 
 - Decap CMS with `backend: { name: github, ... }` and
@@ -67,6 +73,8 @@ This copies (overwrites, on every install):
 - `functions/preview-url.js`
 - `functions/admin/_middleware.js`
 - `public/admin/preview-status.js`
+- `functions/admin/bulk-publish.js`
+- `public/admin/bulk-publish.html`
 
 **Don't hand-edit these** — they're regenerated on every install. Fix bugs
 upstream in this package, bump the version, `npm update` in the consumer.
@@ -90,6 +98,7 @@ Wire the client script into your `public/admin/index.html`:
 | `CF_API_TOKEN` | Production only | `github-webhook.js`, `preview-url.js` | **Recommend a token scoped to only "Cloudflare Pages: Read"**, not a broad account-admin token — that's all this ever needs. |
 | `CF_ACCOUNT_ID` | Production only | `github-webhook.js`, `preview-url.js` | |
 | `PRODUCTION_HOSTNAME` | **Both** Production and Preview | `admin/_middleware.js`, `preview-url.js` | Your production Pages hostname. Blocks `/admin` and `/preview-url` on every other hostname (preview URLs, per-commit URLs). The one var that genuinely needs to exist on Preview too — its whole job is running *there* to detect and block it. Optional: if unset, nothing is blocked (fails open). |
+| `CF_PAGES_EDIT_TOKEN` | Production only | `bulk-publish.js` | Cloudflare API token scoped to **only "Cloudflare Pages: Edit"** on this one project — a deliberately different, more privileged token than the Read-only `CF_API_TOKEN` above, kept separate so widening this one's scope never widens `github-webhook.js`/`preview-url.js`'s. Needed to suspend/restore preview builds; `bulk-publish.js`'s GitHub-side calls use the *caller's own* GitHub token instead (see "Bulk Publish" below), not a fixed secret. |
 
 Why only `PRODUCTION_HOSTNAME` needs both: everything else is only ever
 reached via the production URL in practice — the GitHub webhook always
@@ -104,6 +113,74 @@ Repo → Settings → Webhooks → Add webhook:
 - Content type: `application/json`
 - Secret: same value as `GITHUB_WEBHOOK_SECRET` above
 - Events: "Let me select individual events" → check only **Check runs**
+
+## Bulk Publish
+
+Every Decap Save opens its own `cms/<collection>/<slug>` branch + PR, and
+each individual "Publish" click merges that ONE PR into `main` — which
+Cloudflare Pages builds as a real **production** deployment on every
+push. An editor batch-editing several unrelated entries currently causes
+one production build per entry, even though it's conceptually one
+editing session. Bulk Publish (`/admin/bulk-publish.html`) lets an editor
+combine several currently-open `cms/*` PRs into a single merge to `main`
+instead — one production build, not N.
+
+**How to use it**: log into `/admin` first (Bulk Publish reuses that
+session's GitHub token, no separate login), visit
+`/admin/bulk-publish.html`, click **Enable Bulk Mode**, make your edits
+normally in `/admin`, come back, check which entries to combine, and
+click **Combine, Publish & Turn Off Bulk Mode**.
+
+**"Enable Bulk Mode" suspends ALL Cloudflare builds, not just batches the
+final one** — while it's on, *no* build fires for *any* Save, not just
+the ones you're about to combine (this is a project-wide Cloudflare Pages
+setting, not scoped to one editor's session). Every individual Save still
+creates its normal `cms/*` branch + PR exactly as always — nothing about
+Decap's own behavior changes — it just doesn't trigger a build until you
+publish. Once you combine-and-publish, Bulk Mode turns back off and
+everything resumes exactly as it was.
+
+**A failed publish deliberately leaves Bulk Mode ON** — restoring normal
+builds on a failed/partial publish would let unrelated future Saves start
+building previews again while that batch is still in a broken, half-
+merged state. This is expected, not a stuck/broken toggle; re-run
+Combine & Publish (or "Turn Off Bulk Mode" without publishing) once
+resolved.
+
+**Two very different credentials, deliberately**: the GitHub side (list/
+merge/delete branches) uses the *editor's own* GitHub token — the same
+one Decap's own browser code already holds after OAuth login, read
+straight out of its `localStorage` entry — not a fixed secret. GitHub's
+own permission check on that token is the authorization gate, and
+attribution follows whoever clicked the button, same as their individual
+Saves today. The Cloudflare side (suspending/restoring preview builds) is
+a project-configuration change no personal GitHub token could ever
+authorize, so it genuinely needs its own secret — `CF_PAGES_EDIT_TOKEN`,
+scoped to **Cloudflare Pages: Edit** only, kept deliberately separate
+from the Read-only `CF_API_TOKEN` used elsewhere in this package.
+
+**Under the hood** (why exactly one production build, not one per
+combined entry): calling GitHub's per-PR merge endpoint N times would
+still be N separate pushes to `main`. Instead, each selected branch gets
+merged into one temporary scratch branch first (a real, server-side
+3-way merge via GitHub's own "Merge a branch" API — not a reimplemented
+diff), and only that single scratch branch gets merged into `main` at
+the end. **The original PRs are never explicitly closed or merged via
+the API** — GitHub auto-detects that each open PR's commits are now
+ancestors of `main` (the scratch-branch merges preserve the original
+commit SHAs) and marks each one "Merged" on its own, the same end state
+an individual Decap Publish leaves. **This is deliberate, not a bug** —
+if you're investigating and see PRs marked Merged with no merge commit
+of their own referencing them individually, this is why.
+
+On a real conflict (most likely: two selected branches both editing the
+same single-file collection, e.g. `settings/site.json` — every other
+collection is one-file-per-entry so this is the realistic failure mode),
+the whole operation aborts, nothing already published is touched, and the
+temporary scratch branch is deliberately left in place (not deleted) so
+it's inspectable — delete it manually via GitHub once resolved; a future
+`cleanup-worker` enhancement could target `bulk-publish-*` branches, but
+doesn't yet.
 
 ## Bugs found building this (why the code looks the way it does)
 
