@@ -11,7 +11,7 @@ deployments — every Save creates a new preview deployment, every merge to
 `main` creates a new production one, and Cloudflare never cleans up either
 on its own.
 
-Also includes **Bulk Publish** (`/admin/bulk-publish.html`) — lets an
+Also includes **Bulk Publish** (`/admin/bulk-publish`) — lets an
 editor combine several currently-open `cms/*` PRs into a single merge to
 `main`, producing exactly one production build instead of one per entry,
 and optionally suspends Cloudflare's preview builds entirely while a
@@ -121,25 +121,27 @@ each individual "Publish" click merges that ONE PR into `main` — which
 Cloudflare Pages builds as a real **production** deployment on every
 push. An editor batch-editing several unrelated entries currently causes
 one production build per entry, even though it's conceptually one
-editing session. Bulk Publish (`/admin/bulk-publish.html`) lets an editor
+editing session. Bulk Publish (`/admin/bulk-publish`) lets an editor
 combine several currently-open `cms/*` PRs into a single merge to `main`
 instead — one production build, not N.
 
 **How to use it**: log into `/admin` first (Bulk Publish reuses that
 session's GitHub token, no separate login), visit
-`/admin/bulk-publish.html`, click **Enable Bulk Mode**, make your edits
+`/admin/bulk-publish`, click **Enable Bulk Mode**, make your edits
 normally in `/admin`, come back, check which entries to combine, and
 click **Combine, Publish & Turn Off Bulk Mode**.
 
 The Function backing this page lives at `/admin/bulk-publish-api`, not
-the more obvious `/admin/bulk-publish` — deliberately. Cloudflare Pages'
-"clean URLs" feature 308-redirects `/admin/bulk-publish.html` (the
-static page) to the extension-less `/admin/bulk-publish`, and Functions
-take priority over static assets at the same path — naming the Function
-`/admin/bulk-publish` would have made the page permanently unreachable,
-every request redirected straight into the Function instead of ever
-rendering. Caught live in production before being caught here first;
-worth knowing before "simplifying" this naming later.
+the more obvious `/admin/bulk-publish` — deliberately. The static file
+on disk is `public/admin/bulk-publish.html`, and Cloudflare Pages' "clean
+URLs" feature 308-redirects `/admin/bulk-publish.html` to the extension-
+less `/admin/bulk-publish`, which is the real, final URL that actually
+serves the page's content (not a redirect target you'd rewrite away) —
+and Functions take priority over static assets at the same path. Naming
+the Function `/admin/bulk-publish` would have made the page permanently
+unreachable, every request redirected straight into the Function
+instead of ever rendering. Caught live in production before being
+caught here first; worth knowing before "simplifying" this naming later.
 
 **"Enable Bulk Mode" suspends ALL Cloudflare builds, not just batches the
 final one** — while it's on, *no* build fires for *any* Save, not just

@@ -247,7 +247,7 @@
         showNotice(
           '⚠️ Bulk Mode is ON',
           null,
-          'No Save — this one or anyone else’s — will get a preview build until it’s turned off from /admin/bulk-publish.html.'
+          'No Save — this one or anyone else’s — will get a preview build until it’s turned off from /admin/bulk-publish.'
         );
       }
     })
