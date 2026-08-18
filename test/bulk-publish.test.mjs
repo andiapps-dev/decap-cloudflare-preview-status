@@ -20,10 +20,11 @@ const BASE_ENV = {
   CF_PAGES_PROJECT_NAME: 'fake-project',
 };
 
-function req(body, token) {
+function req(body, token, url) {
   const headers = new Map();
   headers.set('authorization', token ? `Bearer ${token}` : '');
   return {
+    url: url || 'https://example.pages.dev/admin/bulk-publish-api',
     headers: { get: (name) => headers.get(name.toLowerCase()) || null },
     json: async () => body,
   };
@@ -139,6 +140,41 @@ test('onRequestGet: scratch active (setting=custom) reports combined branches + 
   assert.deepEqual(body.scratch.combinedBranches, ['cms/posts/a']);
   assert.equal(body.scratch.preview.status, 'success');
   assert.equal(body.scratch.preview.url, 'https://bulk-publish-123.example.pages.dev');
+});
+
+test('onRequestGet: ?productionSha polls production deployment status by commit hash, ignores others', async () => {
+  const mock = mockFetch([
+    ['pages/projects/fake-project', cfProject('all')],
+    [
+      'pages/projects/fake-project/deployments',
+      jsonRes({
+        success: true,
+        result: [
+          { deployment_trigger: { metadata: { commit_hash: 'other-sha' } }, latest_stage: { name: 'deploy', status: 'success' } },
+          {
+            deployment_trigger: { metadata: { commit_hash: 'target-sha' } },
+            latest_stage: { name: 'build', status: 'active' },
+          },
+        ],
+      }),
+    ],
+  ]);
+  globalThis.fetch = mock.fn;
+  const res = await onRequestGet({
+    request: req(null, null, 'https://example.pages.dev/admin/bulk-publish-api?productionSha=target-sha'),
+    env: BASE_ENV,
+  });
+  const body = await res.json();
+  assert.equal(body.production.status, 'building'); // build/active, not yet deploy/success
+});
+
+test('onRequestGet: no ?productionSha means production is null, no deployments call made', async () => {
+  const mock = mockFetch([['pages/projects/fake-project', cfProject('all')]]);
+  globalThis.fetch = mock.fn;
+  const res = await onRequestGet({ request: req(), env: BASE_ENV });
+  const body = await res.json();
+  assert.equal(body.production, null);
+  assert.equal(mock.calls.length, 1); // only the project-config read, no deployments lookup
 });
 
 // --- enable / disable ---

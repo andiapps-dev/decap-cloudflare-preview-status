@@ -193,17 +193,18 @@ async function setPreviewConfig(env, { setting, includes }) {
 // preview-url.js's own lookup (latest_stage reports whichever stage is
 // CURRENT, only 'deploy'+'success' means actually live), simplified
 // since there's no baseline/after_id race to guard against here (this is
-// a one-shot status check on page load, not a poll started right before
-// the triggering push).
-async function getScratchPreview(env, branch) {
+// a one-shot status check per poll, not a poll started right before the
+// triggering push -- the client re-calls this repeatedly instead, see
+// bulk-publish.html's own poll loop).
+async function getDeploymentStatus(env, cfEnv, predicate) {
   const res = await fetch(
-    `${CF_API}/accounts/${env.CF_ACCOUNT_ID}/pages/projects/${env.CF_PAGES_PROJECT_NAME}/deployments?env=preview`,
+    `${CF_API}/accounts/${env.CF_ACCOUNT_ID}/pages/projects/${env.CF_PAGES_PROJECT_NAME}/deployments?env=${cfEnv}`,
     { headers: cfHeaders(env) }
   );
   if (!res.ok) return { status: 'not_found', url: null };
   const body = await res.json();
   if (!body.success) return { status: 'not_found', url: null };
-  const deployment = (body.result || []).find((d) => d.deployment_trigger?.metadata?.branch === branch);
+  const deployment = (body.result || []).find(predicate);
   if (!deployment) return { status: 'not_found', url: null };
   const stage = deployment.latest_stage;
   let status;
@@ -211,6 +212,18 @@ async function getScratchPreview(env, branch) {
   else if (stage?.name === 'deploy' && stage?.status === 'success') status = 'success';
   else status = 'building';
   return { status, url: deployment.aliases?.[0] || deployment.url || null };
+}
+
+function getScratchPreview(env, branch) {
+  return getDeploymentStatus(env, 'preview', (d) => d.deployment_trigger?.metadata?.branch === branch);
+}
+
+// Used for polling after Publish This -- there's no branch to match on
+// (main gets pushed to repeatedly by all sorts of things), so this
+// matches the exact commit SHA the merge produced instead, the same
+// value returned as mainMergeSha from the publish-scratch action.
+function getProductionStatus(env, sha) {
+  return getDeploymentStatus(env, 'production', (d) => d.deployment_trigger?.metadata?.commit_hash === sha);
 }
 
 // --- GitHub: listing/comparing/merging/deleting branches and PRs ---
@@ -398,7 +411,20 @@ export async function onRequestGet({ request, env }) {
     scratch = { branch: scratchBranch, combinedBranches, preview };
   }
 
-  return jsonResponse({ bulkModeOn, repo: env.GITHUB_REPO, prs, scratch });
+  // Optional: ?productionSha=<sha> -- lets the client poll for the actual
+  // production deployment's status after Publish This returns, the same
+  // way it polls scratch.preview above while combining. Independent of
+  // everything else in this response (doesn't need a token, doesn't care
+  // about bulkModeOn/scratch) since by the time this is polled, the
+  // publish that produced this SHA has already completed and reset bulk
+  // mode -- this is purely "is that specific commit live yet".
+  let production = null;
+  const productionSha = new URL(request.url).searchParams.get('productionSha');
+  if (productionSha) {
+    production = await getProductionStatus(env, productionSha);
+  }
+
+  return jsonResponse({ bulkModeOn, repo: env.GITHUB_REPO, prs, scratch, production });
 }
 
 export async function onRequestPost({ request, env }) {
