@@ -146,6 +146,25 @@ test('onRequestPost disable-and-publish with empty branches: just restores, no G
   assert.equal(mock.calls.length, 2); // never touched GitHub's API at all
 });
 
+test('onRequestPost disable-and-publish with empty branches: works with NO token at all', async () => {
+  // Regression test for a real bug caught in sandbox testing: this path
+  // never touches GitHub, so it must not require a token -- requiring
+  // one here was worse than pointless, since it would never actually be
+  // validated against anything either.
+  const mock = mockFetch([
+    ['pages/projects/fake-project', cfProject('none')],
+    ['pages/projects/fake-project', jsonRes({ success: true, result: {} })],
+  ]);
+  globalThis.fetch = mock.fn;
+  const res = await onRequestPost({
+    request: req({ action: 'disable-and-publish', branches: [] }), // no token
+    env: BASE_ENV,
+  });
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(body.bulkModeOn, false);
+});
+
 test('onRequestPost disable-and-publish: 401 when no token supplied', async () => {
   const res = await onRequestPost({
     request: req({ action: 'disable-and-publish', branches: ['cms/a'] }),

@@ -368,14 +368,16 @@ export async function onRequestPost({ request, env }) {
   }
 
   if (body.action === 'disable-and-publish') {
-    const token = extractToken(request);
-    if (!token) return jsonError(401, 'missing bearer token');
-
     const branches = Array.isArray(body.branches) ? [...new Set(body.branches)] : [];
 
     if (branches.length === 0) {
       // Editor just wants to turn bulk mode back off without publishing
-      // anything -- a distinct, simpler path than the full orchestration.
+      // anything -- a distinct, simpler path than the full orchestration,
+      // and deliberately checked BEFORE requiring a token: this path
+      // never touches GitHub at all (only the Cloudflare-side restore),
+      // so demanding a GitHub token here would be pure theater -- worse
+      // than pointless, since an invalid/expired token would silently
+      // pass a check that's never actually validated against anything.
       try {
         await setPreviewDeploymentSetting(env, 'all');
       } catch (err) {
@@ -383,6 +385,9 @@ export async function onRequestPost({ request, env }) {
       }
       return jsonResponse({ bulkModeOn: false, published: [] });
     }
+
+    const token = extractToken(request);
+    if (!token) return jsonError(401, 'missing bearer token');
 
     let result;
     try {
