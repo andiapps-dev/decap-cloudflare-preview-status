@@ -18,10 +18,27 @@
 // a real PRODUCTION deployment on every push. A content editor batch-
 // editing several unrelated entries currently causes one production
 // build per entry. This endpoint lets an editor combine several
-// currently-open cms/* PRs into a single merge to main -- one production
-// build instead of N -- and, while "Bulk Mode" is on, suspends Cloudflare
-// Pages' own preview-build-on-push behavior entirely, so not even the
-// individual per-entry Saves made during the batch trigger a build.
+// currently-open cms/* PRs into one merge to main -- one production
+// build instead of N -- via three states, not one single action:
+//
+//   OFF -> ON (no scratch) -> ON (scratch, previewable) -> OFF
+//
+// "Enable" suspends Cloudflare's preview-build-on-push entirely
+// (preview_deployment_setting: 'none') -- no build fires for ANY Save,
+// not just the ones about to be combined, so an editor can make several
+// unrelated edits without each one costing a build. "Combine" merges the
+// selected branches into one temporary scratch branch and narrows the
+// Cloudflare setting to 'custom' with preview_branch_includes scoped to
+// JUST that scratch branch -- individual cms/* edits still build
+// nothing, but the deliberately-combined result gets a real preview
+// deployment to actually click through before it goes anywhere near
+// main. From there: "Publish This" merges the scratch branch into main
+// (the one production-triggering push) and restores normal builds, or
+// "Abandon" deletes the scratch branch and drops back to the
+// no-scratch ON state (bulk mode stays on, nothing published, pick a
+// different combination and try again) -- the whole point being able to
+// see the combined result and correct course before it's live, not just
+// after.
 //
 // Two very different credentials are in play here, deliberately:
 //   - GitHub side: this function has NO env.*-sourced GitHub token of
@@ -33,15 +50,15 @@
 //     permission check on that token is the entire authorization gate;
 //     attribution for the merges/branch-deletes follows whoever actually
 //     clicked the button, same as their individual Saves today.
-//   - Cloudflare side: suspending/restoring preview builds is a project-
-//     CONFIGURATION change no editor's personal GitHub token could ever
-//     authorize -- this genuinely needs its own Cloudflare API secret,
-//     unlike every other GitHub-only piece of this design. Kept as its
-//     own separately-named, narrowly-scoped env var (CF_PAGES_EDIT_TOKEN,
-//     "Pages: Edit" only) rather than widening the existing read-only
-//     CF_API_TOKEN that github-webhook.js/preview-url.js use -- widening
-//     THEIR token's scope would widen their blast radius for a
-//     capability only this function needs.
+//   - Cloudflare side: suspending/restoring/narrowing preview builds is a
+//     project-CONFIGURATION change no editor's personal GitHub token
+//     could ever authorize -- this genuinely needs its own Cloudflare API
+//     secret, unlike every other GitHub-only piece of this design. Kept
+//     as its own separately-named, narrowly-scoped env var
+//     (CF_PAGES_EDIT_TOKEN, "Pages: Edit" only) rather than widening the
+//     existing read-only CF_API_TOKEN that github-webhook.js/
+//     preview-url.js use -- widening THEIR token's scope would widen
+//     their blast radius for a capability only this function needs.
 //
 // Placed under functions/admin/ specifically so it inherits
 // admin/_middleware.js's existing PRODUCTION_HOSTNAME gating
@@ -54,17 +71,17 @@
 //                          "Cloudflare Pages: Edit" on this one project.
 //   CF_ACCOUNT_ID / CF_PAGES_PROJECT_NAME  reused, not new names.
 //
-// The exact Cloudflare Pages project-config field that controls preview-
-// branch-build behavior (preview_deployment_setting, values 'all' /
-// 'none' / 'custom' -- see isBulkModeOn()/setPreviewDeploymentSetting()
-// below) is this codebase's best understanding of Cloudflare's current
-// API, NOT something blindly trusted -- it's exactly the kind of API-
-// shape assumption that's bitten this project before (see
-// cleanup-worker's own "SUN" vs "0" cron-syntax surprise in its README).
-// Verify it directly against a real GET on a real project before
-// trusting this in production; the package README's "Bugs found"
-// section is the place to record it if this turns out to need
-// correcting.
+// The exact Cloudflare Pages project-config fields that control preview-
+// branch-build behavior (preview_deployment_setting: 'all'/'none'/
+// 'custom', preview_branch_includes: string[] when 'custom' -- see
+// getBulkState()/setPreviewConfig() below) are this codebase's best
+// understanding of Cloudflare's current API, NOT something blindly
+// trusted -- it's exactly the kind of API-shape assumption that's
+// bitten this project before (see cleanup-worker's own "SUN" vs "0"
+// cron-syntax surprise in its README). Verify directly against a real
+// project before trusting this in production; the package README's
+// "Bugs found" section is the place to record it if this turns out to
+// need correcting.
 
 const GITHUB_API = 'https://api.github.com';
 const CF_API = 'https://api.cloudflare.com/client/v4';
@@ -110,9 +127,10 @@ function missingEnv(env) {
   return null;
 }
 
-// --- Cloudflare: bulk-mode state lives entirely in the project's own
-// config -- no KV/D1/separate storage, nothing to get out of sync with a
-// second source of truth. ---
+// --- Cloudflare: all state (bulk mode on/off, and which scratch branch,
+// if any, is currently the previewable combined result) lives entirely
+// in the project's own config -- no KV/D1/separate storage, nothing to
+// get out of sync with a second source of truth. ---
 
 async function getProject(env) {
   const res = await fetch(
@@ -129,30 +147,37 @@ async function getProject(env) {
   return body.result;
 }
 
-function isBulkModeOn(project) {
-  return project?.source?.config?.preview_deployment_setting === 'none';
+// Three real states, derived from Cloudflare's own config, not tracked
+// separately: 'all' -> bulk mode off; 'none' -> bulk mode on, no active
+// scratch preview; 'custom' with preview_branch_includes set -> bulk mode
+// on, previewing that one scratch branch.
+function getBulkState(project) {
+  const config = project?.source?.config;
+  const setting = config?.preview_deployment_setting;
+  if (setting === 'all') return { bulkModeOn: false, scratchBranch: null };
+  if (setting === 'custom' && Array.isArray(config?.preview_branch_includes) && config.preview_branch_includes.length > 0) {
+    return { bulkModeOn: true, scratchBranch: config.preview_branch_includes[0] };
+  }
+  return { bulkModeOn: true, scratchBranch: null };
 }
 
-// Only ever called with 'none' (enable) or 'all' (restore) -- this
-// package's actual target projects (djvrx, capitaledge) are documented
-// as always running the normal "all branches preview" resting state
-// (preview_branch_includes: ["*"], confirmed in djvrx's README), so
-// restoring to the literal value 'all' is correct for them specifically
-// -- this is NOT a generic "restore whatever arbitrary previous setting
-// existed" mechanism, deliberately simpler than that.
-async function setPreviewDeploymentSetting(env, setting) {
+// `includes` only matters when setting is 'custom'; omit it otherwise.
+// This package's actual target projects (djvrx, capitaledge) are
+// documented as always running the normal "all branches preview" resting
+// state (preview_branch_includes: ["*"], confirmed in djvrx's README),
+// so restoring to the literal value 'all' is correct for them
+// specifically -- this is NOT a generic "restore whatever arbitrary
+// previous setting existed" mechanism, deliberately simpler than that.
+async function setPreviewConfig(env, { setting, includes }) {
   const project = await getProject(env);
+  const config = { ...project.source.config, preview_deployment_setting: setting };
+  if (includes !== undefined) config.preview_branch_includes = includes;
   const res = await fetch(
     `${CF_API}/accounts/${env.CF_ACCOUNT_ID}/pages/projects/${env.CF_PAGES_PROJECT_NAME}`,
     {
       method: 'PATCH',
       headers: cfHeaders(env),
-      body: JSON.stringify({
-        source: {
-          type: project.source.type,
-          config: { ...project.source.config, preview_deployment_setting: setting },
-        },
-      }),
+      body: JSON.stringify({ source: { type: project.source.type, config } }),
     }
   );
   if (!res.ok) {
@@ -164,7 +189,31 @@ async function setPreviewDeploymentSetting(env, setting) {
   }
 }
 
-// --- GitHub: listing/merging/deleting branches and PRs ---
+// Latest preview deployment for one branch -- same shape/reasoning as
+// preview-url.js's own lookup (latest_stage reports whichever stage is
+// CURRENT, only 'deploy'+'success' means actually live), simplified
+// since there's no baseline/after_id race to guard against here (this is
+// a one-shot status check on page load, not a poll started right before
+// the triggering push).
+async function getScratchPreview(env, branch) {
+  const res = await fetch(
+    `${CF_API}/accounts/${env.CF_ACCOUNT_ID}/pages/projects/${env.CF_PAGES_PROJECT_NAME}/deployments?env=preview`,
+    { headers: cfHeaders(env) }
+  );
+  if (!res.ok) return { status: 'not_found', url: null };
+  const body = await res.json();
+  if (!body.success) return { status: 'not_found', url: null };
+  const deployment = (body.result || []).find((d) => d.deployment_trigger?.metadata?.branch === branch);
+  if (!deployment) return { status: 'not_found', url: null };
+  const stage = deployment.latest_stage;
+  let status;
+  if (stage?.status === 'failure') status = 'failure';
+  else if (stage?.name === 'deploy' && stage?.status === 'success') status = 'success';
+  else status = 'building';
+  return { status, url: deployment.aliases?.[0] || deployment.url || null };
+}
+
+// --- GitHub: listing/comparing/merging/deleting branches and PRs ---
 
 async function listOpenCmsPulls(env, token) {
   const prs = [];
@@ -244,15 +293,42 @@ async function deleteBranch(env, token, name) {
   return res.ok;
 }
 
-// --- The orchestration itself ---
+// True if every commit on `branch` is already reachable from
+// `scratchBranch` -- i.e. branch's changes are already part of the
+// scratch branch's own history. Used to derive "which of the currently-
+// open cms/* PRs are actually part of this scratch preview" from GitHub's
+// own ancestry data, rather than trusting any client-remembered list --
+// robust across a page reload mid-preview, since nothing about this
+// depends on browser-held state.
+async function isAncestor(env, token, branch, scratchBranch) {
+  const res = await fetch(
+    `${GITHUB_API}/repos/${env.GITHUB_REPO}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(scratchBranch)}`,
+    { headers: githubHeaders(token) }
+  );
+  if (!res.ok) return false; // fail safe -- never claim it's included if we can't actually tell
+  const body = await res.json();
+  return body.status === 'identical' || body.status === 'ahead';
+}
 
-async function combineAndPublish(env, token, branches) {
-  // Step 0: re-validate every requested branch is STILL an open cms/*
-  // PR right now -- closes the race where a branch's PR was
-  // closed/deleted between the editor loading the list and clicking
-  // publish, and implicitly double-duties as a scope guard against a
-  // non-cms/* branch name reaching this far. Nothing has been created
-  // yet at this point, so aborting here leaves zero cleanup to do.
+async function deriveCombinedBranches(env, token, scratchBranch, openPrs) {
+  const checked = await Promise.all(
+    openPrs.map(async (pr) => ({ branch: pr.branch, included: await isAncestor(env, token, pr.branch, scratchBranch) }))
+  );
+  return checked.filter((c) => c.included).map((c) => c.branch);
+}
+
+// --- The "combine" orchestration: merge each selected branch into one
+// new scratch branch, stopping there -- no touch of main, no cleanup.
+// Separated from the final publish step so the result can be previewed
+// first. ---
+
+async function mergeSelectedIntoScratch(env, token, branches) {
+  // Re-validate every requested branch is STILL an open cms/* PR right
+  // now -- closes the race where a branch's PR was closed/deleted
+  // between the editor loading the list and clicking Combine, and
+  // implicitly double-duties as a scope guard against a non-cms/*
+  // branch name reaching this far. Nothing has been created yet at this
+  // point, so aborting here leaves zero cleanup to do.
   const openPrs = await listOpenCmsPulls(env, token);
   const openBranches = new Set(openPrs.map((pr) => pr.branch));
   for (const branch of branches) {
@@ -290,61 +366,20 @@ async function combineAndPublish(env, token, branches) {
     merged.push(branch);
   }
 
-  // The one production-triggering push.
-  const finalMerge = await mergeBranch(
-    env,
-    token,
-    'main',
-    scratchBranch,
-    `Bulk publish: ${merged.length} ${merged.length === 1 ? 'entry' : 'entries'} (${merged.join(', ')})`
-  );
-  if (!finalMerge.ok) {
-    // Also leave the scratch branch in place -- same reasoning, doubly
-    // so here since this is the very last step.
-    return {
-      response: jsonError(409, `merge conflict combining scratch branch '${scratchBranch}' into main -- this shouldn't normally happen since main didn't move during the combine, but if it did, resolve manually. Scratch branch left in place.`, {
-        scratchBranch,
-        alreadyMerged: merged,
-      }),
-    };
-  }
-
-  // Cleanup. Do NOT explicitly close/merge the original PRs via the
-  // pulls API -- GitHub auto-detects that each open PR's head-branch
-  // commits are now ancestors of main (mergeBranch's merge commits
-  // preserve the original SHAs) and marks each PR "Merged" on its own,
-  // the exact same end state Decap's own individual Publish leaves.
-  // Deliberate, not a bug to "fix" later by adding an explicit close
-  // call -- an explicit close (as opposed to merge) would actually be
-  // WRONG, marking a PR "Closed" instead of "Merged" for something that
-  // did land.
-  const warnings = [];
-  if (!(await deleteBranch(env, token, scratchBranch))) {
-    warnings.push(`could not delete scratch branch '${scratchBranch}' -- harmless, delete manually if desired`);
-  }
-  for (const branch of merged) {
-    if (!(await deleteBranch(env, token, branch))) {
-      warnings.push(`could not delete branch '${branch}' -- harmless, delete manually if desired`);
-    }
-  }
-
-  return {
-    published: merged,
-    mainMergeSha: finalMerge.sha,
-    warnings,
-  };
+  return { scratchBranch, merged };
 }
 
 export async function onRequestGet({ request, env }) {
   const missing = missingEnv(env);
   if (missing) return jsonError(500, `${missing} not configured`);
 
-  let bulkModeOn;
+  let project;
   try {
-    bulkModeOn = isBulkModeOn(await getProject(env));
+    project = await getProject(env);
   } catch (err) {
     return jsonError(502, `could not read Cloudflare project state: ${err.message}`);
   }
+  const { bulkModeOn, scratchBranch } = getBulkState(project);
 
   const token = extractToken(request);
   let prs = [];
@@ -356,7 +391,14 @@ export async function onRequestGet({ request, env }) {
     }
   }
 
-  return jsonResponse({ bulkModeOn, repo: env.GITHUB_REPO, prs });
+  let scratch = null;
+  if (scratchBranch) {
+    const combinedBranches = token ? await deriveCombinedBranches(env, token, scratchBranch, prs) : [];
+    const preview = await getScratchPreview(env, scratchBranch);
+    scratch = { branch: scratchBranch, combinedBranches, preview };
+  }
+
+  return jsonResponse({ bulkModeOn, repo: env.GITHUB_REPO, prs, scratch });
 }
 
 export async function onRequestPost({ request, env }) {
@@ -372,56 +414,151 @@ export async function onRequestPost({ request, env }) {
 
   if (body.action === 'enable') {
     try {
-      await setPreviewDeploymentSetting(env, 'none');
+      await setPreviewConfig(env, { setting: 'none' });
     } catch (err) {
       return jsonError(502, `could not enable bulk mode: ${err.message}`);
     }
     return jsonResponse({ bulkModeOn: true });
   }
 
-  if (body.action === 'disable-and-publish') {
-    const branches = Array.isArray(body.branches) ? [...new Set(body.branches)] : [];
-
-    if (branches.length === 0) {
-      // Editor just wants to turn bulk mode back off without publishing
-      // anything -- a distinct, simpler path than the full orchestration,
-      // and deliberately checked BEFORE requiring a token: this path
-      // never touches GitHub at all (only the Cloudflare-side restore),
-      // so demanding a GitHub token here would be pure theater -- worse
-      // than pointless, since an invalid/expired token would silently
-      // pass a check that's never actually validated against anything.
-      try {
-        await setPreviewDeploymentSetting(env, 'all');
-      } catch (err) {
-        return jsonError(502, `could not disable bulk mode: ${err.message}`);
-      }
-      return jsonResponse({ bulkModeOn: false, published: [] });
+  if (body.action === 'disable') {
+    // Refuses to disable out from under an active scratch preview --
+    // that would leave the scratch branch orphaned (nothing would ever
+    // clean it up) while re-enabling normal builds for everything else,
+    // a confusing half-state. Publish or Abandon it first.
+    let state;
+    try {
+      state = getBulkState(await getProject(env));
+    } catch (err) {
+      return jsonError(502, `could not read Cloudflare project state: ${err.message}`);
     }
+    if (state.scratchBranch) {
+      return jsonError(409, `a combined preview is active on branch '${state.scratchBranch}' -- Publish or Abandon it before disabling Bulk Mode.`);
+    }
+    try {
+      await setPreviewConfig(env, { setting: 'all' });
+    } catch (err) {
+      return jsonError(502, `could not disable bulk mode: ${err.message}`);
+    }
+    return jsonResponse({ bulkModeOn: false });
+  }
 
+  if (body.action === 'combine') {
     const token = extractToken(request);
     if (!token) return jsonError(401, 'missing bearer token');
 
-    let result;
+    const branches = Array.isArray(body.branches) ? [...new Set(body.branches)] : [];
+    if (branches.length === 0) return jsonError(400, 'branches must be a non-empty array');
+
+    let state;
     try {
-      result = await combineAndPublish(env, token, branches);
+      state = getBulkState(await getProject(env));
     } catch (err) {
-      // Genuinely unexpected failure (not one of the handled 409 paths,
-      // which return early with their own Response). Bulk mode stays ON
-      // -- restoring it here would let unrelated future Saves start
-      // building previews again while this batch may be in a broken,
-      // half-merged state, which is worse than leaving it suspended a
-      // little longer.
-      return jsonError(502, `bulk publish failed: ${err.message} -- bulk mode is still ON, nothing was restored`);
+      return jsonError(502, `could not read Cloudflare project state: ${err.message}`);
     }
-    if (result.response) {
-      // One of combineAndPublish's own handled failure paths (409s) --
-      // bulk mode deliberately stays ON, same reasoning as above.
-      return result.response;
+    if (state.scratchBranch) {
+      return jsonError(409, `a combined preview is already active on branch '${state.scratchBranch}' -- Publish or Abandon it first.`);
     }
 
-    // Full success -- now, and only now, restore normal preview builds.
+    let result;
     try {
-      await setPreviewDeploymentSetting(env, 'all');
+      result = await mergeSelectedIntoScratch(env, token, branches);
+    } catch (err) {
+      return jsonError(502, `combine failed: ${err.message} -- bulk mode is still ON, nothing was restored`);
+    }
+    if (result.response) return result.response;
+
+    try {
+      await setPreviewConfig(env, { setting: 'custom', includes: [result.scratchBranch] });
+    } catch (err) {
+      return jsonError(
+        502,
+        `combine succeeded (scratch branch '${result.scratchBranch}') but enabling its preview build failed: ${err.message}`,
+        { scratchBranch: result.scratchBranch, combinedBranches: result.merged }
+      );
+    }
+
+    return jsonResponse({ scratchBranch: result.scratchBranch, combinedBranches: result.merged });
+  }
+
+  if (body.action === 'publish-scratch' || body.action === 'abandon-scratch') {
+    const token = extractToken(request);
+    if (!token) return jsonError(401, 'missing bearer token');
+
+    const scratchBranch = body.scratchBranch;
+    if (!scratchBranch) return jsonError(400, 'missing scratchBranch');
+
+    let state;
+    try {
+      state = getBulkState(await getProject(env));
+    } catch (err) {
+      return jsonError(502, `could not read Cloudflare project state: ${err.message}`);
+    }
+    if (state.scratchBranch !== scratchBranch) {
+      return jsonError(
+        409,
+        `'${scratchBranch}' is not the currently active combined preview (current: ${state.scratchBranch || 'none'}) -- refresh and try again.`
+      );
+    }
+
+    if (body.action === 'abandon-scratch') {
+      if (!(await deleteBranch(env, token, scratchBranch))) {
+        return jsonError(502, `could not delete scratch branch '${scratchBranch}'`);
+      }
+      try {
+        await setPreviewConfig(env, { setting: 'none' });
+      } catch (err) {
+        return jsonError(502, `scratch branch deleted but resetting the preview config failed: ${err.message} -- bulk mode may still show the old scratch branch, try again`);
+      }
+      return jsonResponse({ bulkModeOn: true, scratchBranch: null });
+    }
+
+    // publish-scratch: derive which branches are actually part of this
+    // scratch from GitHub's own ancestry data (not a client-supplied
+    // list) -- correct even if the page was reloaded since Combine ran.
+    let openPrs;
+    try {
+      openPrs = await listOpenCmsPulls(env, token);
+    } catch (err) {
+      return jsonError(502, `could not list open cms/* PRs: ${err.message}`);
+    }
+    const combinedBranches = await deriveCombinedBranches(env, token, scratchBranch, openPrs);
+
+    const finalMerge = await mergeBranch(
+      env,
+      token,
+      'main',
+      scratchBranch,
+      `Bulk publish: ${combinedBranches.length} ${combinedBranches.length === 1 ? 'entry' : 'entries'} (${combinedBranches.join(', ')})`
+    );
+    if (!finalMerge.ok) {
+      // Shouldn't normally happen -- main didn't move since Combine ran
+      // -- but if it did, leave the scratch branch in place, same
+      // reasoning as every other conflict path in this file.
+      return jsonError(409, `merge conflict publishing scratch branch '${scratchBranch}' into main -- resolve manually. Scratch branch left in place.`, { scratchBranch });
+    }
+
+    // Cleanup. Do NOT explicitly close/merge the original PRs via the
+    // pulls API -- GitHub auto-detects that each open PR's head-branch
+    // commits are now ancestors of main (mergeBranch's merge commits
+    // preserve the original SHAs) and marks each PR "Merged" on its own,
+    // the exact same end state Decap's own individual Publish leaves.
+    // Deliberate, not a bug to "fix" later by adding an explicit close
+    // call -- an explicit close (as opposed to merge) would actually be
+    // WRONG, marking a PR "Closed" instead of "Merged" for something
+    // that did land.
+    const warnings = [];
+    if (!(await deleteBranch(env, token, scratchBranch))) {
+      warnings.push(`could not delete scratch branch '${scratchBranch}' -- harmless, delete manually if desired`);
+    }
+    for (const branch of combinedBranches) {
+      if (!(await deleteBranch(env, token, branch))) {
+        warnings.push(`could not delete branch '${branch}' -- harmless, delete manually if desired`);
+      }
+    }
+
+    try {
+      await setPreviewConfig(env, { setting: 'all' });
     } catch (err) {
       // The publish itself succeeded -- this is a worse situation than
       // enable failing, since it means bulk mode is now stuck ON with no
@@ -430,17 +567,19 @@ export async function onRequestPost({ request, env }) {
       // fully true.
       return jsonResponse(
         {
-          ...result,
+          published: combinedBranches,
+          mainMergeSha: finalMerge.sha,
+          warnings,
           repo: env.GITHUB_REPO,
           bulkModeOn: true,
-          error: `publish succeeded but restoring normal preview builds failed: ${err.message} -- bulk mode is still ON, try Enable/Disable again or fix manually in the Cloudflare dashboard`,
+          error: `publish succeeded but restoring normal preview builds failed: ${err.message} -- bulk mode is still ON, try again or fix manually in the Cloudflare dashboard`,
         },
         200
       );
     }
 
-    return jsonResponse({ ...result, repo: env.GITHUB_REPO, bulkModeOn: false });
+    return jsonResponse({ published: combinedBranches, mainMergeSha: finalMerge.sha, warnings, repo: env.GITHUB_REPO, bulkModeOn: false });
   }
 
-  return jsonError(400, `unknown action '${body.action}' -- expected 'enable' or 'disable-and-publish'`);
+  return jsonError(400, `unknown action '${body.action}' -- expected 'enable', 'disable', 'combine', 'publish-scratch', or 'abandon-scratch'`);
 }

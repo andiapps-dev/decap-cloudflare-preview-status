@@ -17,6 +17,14 @@
     // Decap's own DOM tree, for the same reason). This page reuses the
     // already-logged-in editor's own GitHub token instead of running its
     // own login flow -- see getToken() below.
+    //
+    // Three states, driven entirely by what GET /admin/bulk-publish-api
+    // reports (no client-side state machine of its own beyond what's
+    // needed for one in-flight request):
+    //   1. bulkModeOn: false                -> "Enable Bulk Mode"
+    //   2. bulkModeOn: true,  scratch: null  -> picklist + "Combine & Preview"
+    //   3. bulkModeOn: true,  scratch: {...} -> combined branches + preview
+    //      link + "Publish This" / "Abandon"
     (function () {
       const root = document.getElementById('bulk-publish-root');
 
@@ -112,7 +120,7 @@
             el('p', { style: 'color:#666;' }, [
               'Enable Bulk Mode to make several edits without triggering a build for each one. ',
               'While it’s on, no preview or production build fires for anything — not just what you edit here, but every Save from anyone. ',
-              'When you’re done, come back here to combine and publish everything at once.',
+              'When you’re done, come back here to combine, preview, and publish.',
             ]),
             el(
               'button',
@@ -139,7 +147,7 @@
         );
       }
 
-      function renderOn(repo, prs) {
+      function renderPicklist(repo, prs) {
         root.innerHTML = '';
 
         const banner = el(
@@ -188,7 +196,7 @@
           container.appendChild(row);
         });
 
-        const publishBtn = el(
+        const combineBtn = el(
           'button',
           {
             style:
@@ -196,38 +204,132 @@
               'font-size:14px;cursor:pointer;margin-top:16px;margin-right:10px;opacity:0.5;',
             disabled: 'true',
           },
-          ['Combine, Publish & Turn Off Bulk Mode']
+          ['Combine & Preview']
         );
 
-        function refreshPublishState() {
+        function refreshCombineState() {
           const anyChecked = checkboxes.some((c) => c.checked);
-          publishBtn.disabled = !anyChecked;
-          publishBtn.style.opacity = anyChecked ? '1' : '0.5';
+          combineBtn.disabled = !anyChecked;
+          combineBtn.style.opacity = anyChecked ? '1' : '0.5';
         }
-        checkboxes.forEach((c) => c.addEventListener('change', refreshPublishState));
+        checkboxes.forEach((c) => c.addEventListener('change', refreshCombineState));
 
-        publishBtn.addEventListener('click', async () => {
+        combineBtn.addEventListener('click', async () => {
           const selected = checkboxes.filter((c) => c.checked).map((c) => c.value);
           if (selected.length === 0) return;
-          // This triggers a real production build and turns bulk mode
-          // back off -- not meant to be a casual click, same reasoning
-          // as the cleanup worker's grace period + manual-trigger gate.
-          const confirmed = confirm(`Combine and publish ${selected.length} entr${selected.length === 1 ? 'y' : 'ies'}? This will trigger one production build.`);
+
+          combineBtn.disabled = true;
+          combineBtn.textContent = 'Combining…';
+          const { ok, data } = await api('combine', { branches: selected });
+
+          if (!ok) {
+            let msg = data.error || 'combine failed';
+            if (data.conflictedBranch) msg += `\nConflicted branch: ${data.conflictedBranch}`;
+            if (data.scratchBranch) msg += `\nScratch branch (left in place): ${data.scratchBranch}`;
+            if (data.alreadyMerged && data.alreadyMerged.length) msg += `\nAlready merged before the failure: ${data.alreadyMerged.join(', ')}`;
+            renderError(msg);
+            combineBtn.disabled = false;
+            combineBtn.textContent = 'Combine & Preview';
+            return;
+          }
+
+          load();
+        });
+
+        const cancelBtn = el(
+          'button',
+          {
+            style:
+              'background:none;color:#666;border:1px solid #ccc;padding:10px 18px;border-radius:4px;' +
+              'font-size:14px;cursor:pointer;margin-top:16px;',
+            onclick: async (e) => {
+              e.target.disabled = true;
+              const { ok, data } = await api('disable');
+              if (!ok) {
+                e.target.disabled = false;
+                renderError(data.error || 'failed to turn off bulk mode');
+                return;
+              }
+              load();
+            },
+          },
+          ['Turn Off Bulk Mode (don’t publish anything)']
+        );
+
+        container.appendChild(combineBtn);
+        container.appendChild(cancelBtn);
+        root.appendChild(container);
+      }
+
+      function renderScratchPreview(repo, scratch) {
+        root.innerHTML = '';
+
+        const banner = el(
+          'div',
+          {
+            style:
+              'background:#1a1a1a;color:#fff;padding:10px 16px;border-radius:4px;font:14px -apple-system,sans-serif;' +
+              'margin-bottom:16px;',
+          },
+          ['Bulk Mode is ON — previewing a combined result before publishing.']
+        );
+
+        const container = el('div', { style: 'font:14px -apple-system,sans-serif;padding:24px;max-width:640px;' });
+        container.appendChild(banner);
+        container.appendChild(el('h1', { style: 'font-size:18px;margin:0 0 12px;' }, ['Review before publishing']));
+
+        container.appendChild(
+          el('p', {}, [
+            `Combining ${scratch.combinedBranches.length} ${scratch.combinedBranches.length === 1 ? 'entry' : 'entries'}: `,
+            el('code', {}, [scratch.combinedBranches.join(', ')]),
+          ])
+        );
+
+        const statusText = {
+          building: '⏳ Building preview…',
+          success: '✅ Preview ready',
+          failure: '❌ Preview build failed',
+          not_found: '⏳ Waiting for build to start…',
+        }[scratch.preview.status] || scratch.preview.status;
+
+        const previewRow = el('p', {}, [statusText]);
+        if (scratch.preview.url) {
+          previewRow.appendChild(document.createTextNode(' — '));
+          previewRow.appendChild(
+            el('a', { href: scratch.preview.url, target: '_blank', rel: 'noopener noreferrer' }, ['Open preview →'])
+          );
+        }
+        container.appendChild(previewRow);
+
+        if (scratch.preview.status === 'building' || scratch.preview.status === 'not_found') {
+          container.appendChild(
+            el('p', { style: 'color:#666;font-size:12px;' }, ['Refresh this page in a moment if the preview isn’t ready yet.'])
+          );
+        }
+
+        const publishBtn = el(
+          'button',
+          {
+            style:
+              'background:#1a1a1a;color:#fff;border:none;padding:10px 18px;border-radius:4px;' +
+              'font-size:14px;cursor:pointer;margin-top:16px;margin-right:10px;',
+          },
+          ['Publish This']
+        );
+        publishBtn.addEventListener('click', async () => {
+          const confirmed = confirm(
+            `Publish ${scratch.combinedBranches.length} ${scratch.combinedBranches.length === 1 ? 'entry' : 'entries'}? This will trigger one production build.`
+          );
           if (!confirmed) return;
 
           publishBtn.disabled = true;
           publishBtn.textContent = 'Publishing…';
-          const { ok, data } = await api('disable-and-publish', { branches: selected });
+          const { ok, data } = await api('publish-scratch', { scratchBranch: scratch.branch });
 
           if (!ok) {
-            let msg = data.error || 'publish failed';
-            if (data.conflictedBranch) msg += `\nConflicted branch: ${data.conflictedBranch}`;
-            if (data.scratchBranch) msg += `\nScratch branch (left in place): ${data.scratchBranch}`;
-            if (data.alreadyMerged && data.alreadyMerged.length) msg += `\nAlready merged before the failure: ${data.alreadyMerged.join(', ')}`;
-            msg += '\n\nBulk Mode is still ON.';
-            renderError(msg);
+            renderError(data.error || 'publish failed');
             publishBtn.disabled = false;
-            publishBtn.textContent = 'Combine, Publish & Turn Off Bulk Mode';
+            publishBtn.textContent = 'Publish This';
             return;
           }
 
@@ -248,28 +350,33 @@
           );
         });
 
-        const cancelBtn = el(
+        const abandonBtn = el(
           'button',
           {
             style:
-              'background:none;color:#666;border:1px solid #ccc;padding:10px 18px;border-radius:4px;' +
+              'background:none;color:#a66;border:1px solid #a66;padding:10px 18px;border-radius:4px;' +
               'font-size:14px;cursor:pointer;margin-top:16px;',
-            onclick: async (e) => {
-              e.target.disabled = true;
-              const { ok, data } = await api('disable-and-publish', { branches: [] });
-              if (!ok) {
-                e.target.disabled = false;
-                renderError(data.error || 'failed to turn off bulk mode');
-                return;
-              }
-              load();
-            },
           },
-          ['Turn Off Bulk Mode (don’t publish anything)']
+          ['Abandon (don’t publish, pick again)']
         );
+        abandonBtn.addEventListener('click', async () => {
+          const confirmed = confirm('Discard this combined preview? The individual entries stay open — you can pick a different combination afterward.');
+          if (!confirmed) return;
+
+          abandonBtn.disabled = true;
+          abandonBtn.textContent = 'Abandoning…';
+          const { ok, data } = await api('abandon-scratch', { scratchBranch: scratch.branch });
+          if (!ok) {
+            renderError(data.error || 'failed to abandon');
+            abandonBtn.disabled = false;
+            abandonBtn.textContent = 'Abandon (don’t publish, pick again)';
+            return;
+          }
+          load();
+        });
 
         container.appendChild(publishBtn);
-        container.appendChild(cancelBtn);
+        container.appendChild(abandonBtn);
         root.appendChild(container);
       }
 
@@ -287,10 +394,12 @@
           return;
         }
 
-        if (data.bulkModeOn) {
-          renderOn(data.repo, data.prs || []);
-        } else {
+        if (!data.bulkModeOn) {
           renderOff();
+        } else if (data.scratch) {
+          renderScratchPreview(data.repo, data.scratch);
+        } else {
+          renderPicklist(data.repo, data.prs || []);
         }
       }
 

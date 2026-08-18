@@ -34,11 +34,16 @@
     return new Date().toLocaleTimeString([], { hour12: true });
   }
 
-  // Full-width bar fixed to the very top of the viewport — Decap's own
-  // React app doesn't expose a stable hook for inserting directly next to
-  // its Save button (fragile to target precisely, could break on any
-  // Decap update), so this achieves "prominent, not tucked in a corner"
-  // by sitting above everything instead, always the first thing visible.
+  // Fixed box, bottom-left corner -- originally a full-width bar pinned
+  // to the very top of the viewport, but that covered up whatever Decap
+  // itself renders up there (its own header/toolbar), a real reported
+  // problem. Bottom-left specifically so it doesn't collide with the
+  // GitHub/Cloudflare service-status widget, which lives bottom-right
+  // (see the bottom of this file) -- the two are independent, unrelated
+  // pieces of status and shouldn't visually compete for the same corner.
+  // Stacked/multiline (flex-direction:column) rather than one long
+  // horizontal row, so a note+link don't force the box wider than it
+  // needs to be.
   function showNotice(message, url, note) {
     const existing = document.getElementById('preview-status-notice');
     if (existing) existing.remove();
@@ -46,14 +51,25 @@
     const notice = document.createElement('div');
     notice.id = 'preview-status-notice';
     notice.style.cssText =
-      'position:fixed;top:0;left:0;right:0;z-index:9999;' +
-      'background:#1a1a1a;color:#fff;padding:12px 20px;' +
+      'position:fixed;bottom:12px;left:12px;z-index:9999;max-width:340px;' +
+      'background:#1a1a1a;color:#fff;padding:12px 16px;border-radius:6px;' +
       'font:14px -apple-system,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.3);' +
-      'display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap;';
+      'display:flex;flex-direction:column;align-items:flex-start;gap:6px;';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;';
 
     const text = document.createElement('span');
     text.textContent = `[${timestamp()}] ${message}`;
-    notice.appendChild(text);
+    header.appendChild(text);
+
+    const close = document.createElement('button');
+    close.textContent = '✕';
+    close.style.cssText = 'background:none;border:none;color:#aaa;cursor:pointer;font-size:14px;flex-shrink:0;';
+    close.onclick = () => notice.remove();
+    header.appendChild(close);
+
+    notice.appendChild(header);
 
     if (note) {
       const noteEl = document.createElement('span');
@@ -71,12 +87,6 @@
       link.style.cssText = 'color:#4fc3f7;font-weight:600;text-decoration:underline;white-space:nowrap;';
       notice.appendChild(link);
     }
-
-    const close = document.createElement('button');
-    close.textContent = '✕';
-    close.style.cssText = 'background:none;border:none;color:#aaa;cursor:pointer;font-size:14px;';
-    close.onclick = () => notice.remove();
-    notice.appendChild(close);
 
     document.body.appendChild(notice);
     return notice;

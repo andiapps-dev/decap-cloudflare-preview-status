@@ -126,10 +126,15 @@ combine several currently-open `cms/*` PRs into a single merge to `main`
 instead — one production build, not N.
 
 **How to use it**: log into `/admin` first (Bulk Publish reuses that
-session's GitHub token, no separate login), visit
-`/admin/bulk-publish`, click **Enable Bulk Mode**, make your edits
-normally in `/admin`, come back, check which entries to combine, and
-click **Combine, Publish & Turn Off Bulk Mode**.
+session's GitHub token, no separate login), visit `/admin/bulk-publish`,
+click **Enable Bulk Mode**, make your edits normally in `/admin`, come
+back and check which entries to combine, then **Combine & Preview**.
+That merges the selection into a temporary branch and gives it a real
+preview build to click through — nothing has touched `main` yet. From
+there: **Publish This** (the one production build) if it looks right,
+or **Abandon** to discard it and pick a different combination without
+publishing anything — the individual entries stay open either way, so
+abandoning costs nothing.
 
 The Function backing this page lives at `/admin/bulk-publish-api`, not
 the more obvious `/admin/bulk-publish` — deliberately. The static file
@@ -155,9 +160,18 @@ everything resumes exactly as it was.
 **A failed publish deliberately leaves Bulk Mode ON** — restoring normal
 builds on a failed/partial publish would let unrelated future Saves start
 building previews again while that batch is still in a broken, half-
-merged state. This is expected, not a stuck/broken toggle; re-run
-Combine & Publish (or "Turn Off Bulk Mode" without publishing) once
-resolved.
+merged state. This is expected, not a stuck/broken toggle; Abandon or
+retry Publish once resolved.
+
+**The three states are read directly from Cloudflare's own project
+config, not tracked separately** — `preview_deployment_setting: 'all'`
+(off), `'none'` (on, no active combination), `'custom'` with
+`preview_branch_includes` pointing at exactly one scratch branch (on,
+previewing that combination). A page reload mid-preview recovers
+correctly on its own: which original branches are "part of" the active
+scratch is derived fresh from GitHub's own commit-ancestry data every
+time (`GET .../compare/{branch}...{scratch}`), never from anything the
+browser remembered — nothing is lost by closing the tab.
 
 **Two very different credentials, deliberately**: the GitHub side (list/
 merge/delete branches) uses the *editor's own* GitHub token — the same
@@ -173,17 +187,19 @@ from the Read-only `CF_API_TOKEN` used elsewhere in this package.
 
 **Under the hood** (why exactly one production build, not one per
 combined entry): calling GitHub's per-PR merge endpoint N times would
-still be N separate pushes to `main`. Instead, each selected branch gets
-merged into one temporary scratch branch first (a real, server-side
-3-way merge via GitHub's own "Merge a branch" API — not a reimplemented
-diff), and only that single scratch branch gets merged into `main` at
-the end. **The original PRs are never explicitly closed or merged via
-the API** — GitHub auto-detects that each open PR's commits are now
-ancestors of `main` (the scratch-branch merges preserve the original
-commit SHAs) and marks each one "Merged" on its own, the same end state
-an individual Decap Publish leaves. **This is deliberate, not a bug** —
-if you're investigating and see PRs marked Merged with no merge commit
-of their own referencing them individually, this is why.
+still be N separate pushes to `main`. Instead, **Combine & Preview**
+merges each selected branch into one temporary scratch branch (a real,
+server-side 3-way merge via GitHub's own "Merge a branch" API — not a
+reimplemented diff) and stops there — nothing touches `main` yet, that
+scratch branch just gets its own real preview build to review. Only
+**Publish This**, a separate later step, merges that single scratch
+branch into `main`. **The original PRs are never explicitly closed or
+merged via the API** — GitHub auto-detects that each open PR's commits
+are now ancestors of `main` (the scratch-branch merges preserve the
+original commit SHAs) and marks each one "Merged" on its own, the same
+end state an individual Decap Publish leaves. **This is deliberate, not
+a bug** — if you're investigating and see PRs marked Merged with no
+merge commit of their own referencing them individually, this is why.
 
 On a real conflict (most likely: two selected branches both editing the
 same single-file collection, e.g. `settings/site.json` — every other
