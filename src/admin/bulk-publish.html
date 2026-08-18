@@ -68,7 +68,7 @@
         const token = getToken();
         const headers = { 'Content-Type': 'application/json' };
         if (token) headers.Authorization = `Bearer ${token}`;
-        const res = await fetch('/admin/bulk-publish', {
+        const res = await fetch('/admin/bulk-publish-api', {
           method: action ? 'POST' : 'GET',
           headers,
           body: action ? JSON.stringify(Object.assign({ action }, body)) : undefined,

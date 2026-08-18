@@ -29,7 +29,7 @@ const files = [
   ['src/functions/preview-url.js', 'functions/preview-url.js'],
   ['src/functions/admin/_middleware.js', 'functions/admin/_middleware.js'],
   ['src/admin/preview-status.js', 'public/admin/preview-status.js'],
-  ['src/functions/admin/bulk-publish.js', 'functions/admin/bulk-publish.js'],
+  ['src/functions/admin/bulk-publish-api.js', 'functions/admin/bulk-publish-api.js'],
   ['src/admin/bulk-publish.html', 'public/admin/bulk-publish.html'],
 ];
 

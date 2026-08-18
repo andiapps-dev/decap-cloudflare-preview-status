@@ -228,7 +228,7 @@
     });
   }
 
-  // Bulk Publish (functions/admin/bulk-publish.js) can suspend preview
+  // Bulk Publish (functions/admin/bulk-publish-api.js) can suspend preview
   // builds project-wide while "Bulk Mode" is on -- if an editor enables
   // it and never comes back to publish/disable it, every future Save
   // from ANYONE, not just that editor, silently stops getting preview
@@ -240,7 +240,7 @@
   // this is a convenience banner, not a load-bearing check, and
   // shouldn't itself become a source of noisy errors on every admin page
   // load for a project that hasn't set up Bulk Publish's env vars at all.
-  fetch('/admin/bulk-publish', { cache: 'no-store' })
+  fetch('/admin/bulk-publish-api', { cache: 'no-store' })
     .then((res) => res.json())
     .then((data) => {
       if (data.bulkModeOn) {

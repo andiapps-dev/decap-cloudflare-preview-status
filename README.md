@@ -73,7 +73,7 @@ This copies (overwrites, on every install):
 - `functions/preview-url.js`
 - `functions/admin/_middleware.js`
 - `public/admin/preview-status.js`
-- `functions/admin/bulk-publish.js`
+- `functions/admin/bulk-publish-api.js`
 - `public/admin/bulk-publish.html`
 
 **Don't hand-edit these** — they're regenerated on every install. Fix bugs
@@ -98,7 +98,7 @@ Wire the client script into your `public/admin/index.html`:
 | `CF_API_TOKEN` | Production only | `github-webhook.js`, `preview-url.js` | **Recommend a token scoped to only "Cloudflare Pages: Read"**, not a broad account-admin token — that's all this ever needs. |
 | `CF_ACCOUNT_ID` | Production only | `github-webhook.js`, `preview-url.js` | |
 | `PRODUCTION_HOSTNAME` | **Both** Production and Preview | `admin/_middleware.js`, `preview-url.js` | Your production Pages hostname. Blocks `/admin` and `/preview-url` on every other hostname (preview URLs, per-commit URLs). The one var that genuinely needs to exist on Preview too — its whole job is running *there* to detect and block it. Optional: if unset, nothing is blocked (fails open). |
-| `CF_PAGES_EDIT_TOKEN` | Production only | `bulk-publish.js` | Cloudflare API token scoped to **only "Cloudflare Pages: Edit"** on this one project — a deliberately different, more privileged token than the Read-only `CF_API_TOKEN` above, kept separate so widening this one's scope never widens `github-webhook.js`/`preview-url.js`'s. Needed to suspend/restore preview builds; `bulk-publish.js`'s GitHub-side calls use the *caller's own* GitHub token instead (see "Bulk Publish" below), not a fixed secret. |
+| `CF_PAGES_EDIT_TOKEN` | Production only | `bulk-publish-api.js` | Cloudflare API token scoped to **only "Cloudflare Pages: Edit"** on this one project — a deliberately different, more privileged token than the Read-only `CF_API_TOKEN` above, kept separate so widening this one's scope never widens `github-webhook.js`/`preview-url.js`'s. Needed to suspend/restore preview builds; `bulk-publish-api.js`'s GitHub-side calls use the *caller's own* GitHub token instead (see "Bulk Publish" below), not a fixed secret. |
 
 Why only `PRODUCTION_HOSTNAME` needs both: everything else is only ever
 reached via the production URL in practice — the GitHub webhook always
@@ -130,6 +130,16 @@ session's GitHub token, no separate login), visit
 `/admin/bulk-publish.html`, click **Enable Bulk Mode**, make your edits
 normally in `/admin`, come back, check which entries to combine, and
 click **Combine, Publish & Turn Off Bulk Mode**.
+
+The Function backing this page lives at `/admin/bulk-publish-api`, not
+the more obvious `/admin/bulk-publish` — deliberately. Cloudflare Pages'
+"clean URLs" feature 308-redirects `/admin/bulk-publish.html` (the
+static page) to the extension-less `/admin/bulk-publish`, and Functions
+take priority over static assets at the same path — naming the Function
+`/admin/bulk-publish` would have made the page permanently unreachable,
+every request redirected straight into the Function instead of ever
+rendering. Caught live in production before being caught here first;
+worth knowing before "simplifying" this naming later.
 
 **"Enable Bulk Mode" suspends ALL Cloudflare builds, not just batches the
 final one** — while it's on, *no* build fires for *any* Save, not just

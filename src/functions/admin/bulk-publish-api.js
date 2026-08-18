@@ -1,4 +1,16 @@
-// Cloudflare Pages Function: GET/POST /admin/bulk-publish
+// Cloudflare Pages Function: GET/POST /admin/bulk-publish-api
+//
+// Deliberately NOT /admin/bulk-publish -- Cloudflare Pages' "clean URLs"
+// feature 308-redirects /admin/bulk-publish.html (the static page this
+// Function's own client, public/admin/bulk-publish.html, is served as)
+// to the extension-less /admin/bulk-publish, and Functions take priority
+// over static assets at the same path. Naming the Function's own route
+// bulk-publish.html would have made the static page permanently
+// unreachable (every request redirected straight into this Function
+// instead) -- exactly the trap already documented and avoided for
+// capitaledge's /api/consultation vs /consultation. Confirmed live in
+// production before this fix: hitting /admin/bulk-publish.html on both
+// djvrx and capitaledge returned this Function's JSON, never the page.
 //
 // Every Decap Save (publish_mode: editorial_workflow) opens its own
 // cms/<collection>/<slug> branch + PR, and each individual "Publish"

@@ -11,7 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { onRequestGet, onRequestPost } from '../src/functions/admin/bulk-publish.js';
+import { onRequestGet, onRequestPost } from '../src/functions/admin/bulk-publish-api.js';
 
 const BASE_ENV = {
   GITHUB_REPO: 'test-owner/test-repo',
