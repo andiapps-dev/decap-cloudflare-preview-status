@@ -414,7 +414,7 @@ export async function onRequestPost({ request, env }) {
 
   if (body.action === 'enable') {
     try {
-      await setPreviewConfig(env, { setting: 'none' });
+      await setPreviewConfig(env, { setting: 'none', includes: [] });
     } catch (err) {
       return jsonError(502, `could not enable bulk mode: ${err.message}`);
     }
@@ -436,7 +436,7 @@ export async function onRequestPost({ request, env }) {
       return jsonError(409, `a combined preview is active on branch '${state.scratchBranch}' -- Publish or Abandon it before disabling Bulk Mode.`);
     }
     try {
-      await setPreviewConfig(env, { setting: 'all' });
+      await setPreviewConfig(env, { setting: 'all', includes: ['*'] });
     } catch (err) {
       return jsonError(502, `could not disable bulk mode: ${err.message}`);
     }
@@ -506,7 +506,7 @@ export async function onRequestPost({ request, env }) {
         return jsonError(502, `could not delete scratch branch '${scratchBranch}'`);
       }
       try {
-        await setPreviewConfig(env, { setting: 'none' });
+        await setPreviewConfig(env, { setting: 'none', includes: [] });
       } catch (err) {
         return jsonError(502, `scratch branch deleted but resetting the preview config failed: ${err.message} -- bulk mode may still show the old scratch branch, try again`);
       }
@@ -558,7 +558,7 @@ export async function onRequestPost({ request, env }) {
     }
 
     try {
-      await setPreviewConfig(env, { setting: 'all' });
+      await setPreviewConfig(env, { setting: 'all', includes: ['*'] });
     } catch (err) {
       // The publish itself succeeded -- this is a worse situation than
       // enable failing, since it means bulk mode is now stuck ON with no
