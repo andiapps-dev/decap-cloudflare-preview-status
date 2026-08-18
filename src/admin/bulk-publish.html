@@ -28,6 +28,16 @@
     (function () {
       const root = document.getElementById('bulk-publish-root');
 
+      // Bumped at the top of load() and wherever else the page navigates
+      // to a different view -- any in-flight poll loop (scratch preview
+      // building, production deployment after Publish) checks its own
+      // stamped generation before acting and silently gives up if it's
+      // been superseded. Same pattern preview-status.js already uses for
+      // exactly the same reason: without it, clicking Abandon/Publish
+      // while an earlier poll is still in flight would let that stale
+      // loop overwrite whatever the newer action just rendered.
+      let generation = 0;
+
       function el(tag, attrs, children) {
         const node = document.createElement(tag);
         if (attrs) {
@@ -285,26 +295,56 @@
           ])
         );
 
-        const statusText = {
+        const PREVIEW_STATUS_TEXT = {
           building: '⏳ Building preview…',
           success: '✅ Preview ready',
           failure: '❌ Preview build failed',
           not_found: '⏳ Waiting for build to start…',
-        }[scratch.preview.status] || scratch.preview.status;
+        };
 
-        const previewRow = el('p', {}, [statusText]);
-        if (scratch.preview.url) {
-          previewRow.appendChild(document.createTextNode(' — '));
-          previewRow.appendChild(
-            el('a', { href: scratch.preview.url, target: '_blank', rel: 'noopener noreferrer' }, ['Open preview →'])
-          );
-        }
+        const previewRow = el('p', {}, []);
         container.appendChild(previewRow);
 
+        function renderPreviewStatus(preview) {
+          previewRow.innerHTML = '';
+          previewRow.appendChild(document.createTextNode(PREVIEW_STATUS_TEXT[preview.status] || preview.status));
+          if (preview.url) {
+            previewRow.appendChild(document.createTextNode(' — '));
+            previewRow.appendChild(
+              el('a', { href: preview.url, target: '_blank', rel: 'noopener noreferrer' }, ['Open preview →'])
+            );
+          }
+        }
+        renderPreviewStatus(scratch.preview);
+
+        // Auto-refresh while the scratch branch's own preview build is
+        // still in flight -- same reasoning/shape as preview-status.js's
+        // poll loop for ordinary Decap saves, just polling this page's
+        // own GET instead of preview-url.js. Stops on its own once the
+        // build settles (success/failure) or after ~2 minutes; also
+        // bails immediately, doing a full reload instead, if the scratch
+        // branch this loop was watching isn't the active one anymore
+        // (published/abandoned from elsewhere, e.g. another tab).
         if (scratch.preview.status === 'building' || scratch.preview.status === 'not_found') {
-          container.appendChild(
-            el('p', { style: 'color:#666;font-size:12px;' }, ['Refresh this page in a moment if the preview isn’t ready yet.'])
-          );
+          const myGeneration = ++generation;
+          (async function poll(attempt) {
+            if (myGeneration !== generation) return;
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+            if (myGeneration !== generation) return;
+
+            const { ok, data } = await api(null);
+            if (myGeneration !== generation) return;
+            if (!ok || !data.scratch || data.scratch.branch !== scratch.branch) {
+              load();
+              return;
+            }
+
+            renderPreviewStatus(data.scratch.preview);
+            if (data.scratch.preview.status === 'building' || data.scratch.preview.status === 'not_found') {
+              if (attempt < 24) poll(attempt + 1);
+              else previewRow.appendChild(el('span', { style: 'color:#666;font-size:12px;' }, [' (still building after 2 minutes — check back later)']));
+            }
+          })(0);
         }
 
         const publishBtn = el(
@@ -333,21 +373,7 @@
             return;
           }
 
-          root.innerHTML = '';
-          root.appendChild(
-            el('div', { style: 'font:14px -apple-system,sans-serif;padding:24px;max-width:640px;' }, [
-              el('h1', { style: 'font-size:18px;margin:0 0 12px;' }, ['Published']),
-              el('p', {}, [`Combined and published ${data.published.length} entr${data.published.length === 1 ? 'y' : 'ies'}: ${data.published.join(', ')}`]),
-              el('p', {}, [
-                'Commit: ',
-                el('a', { href: `https://github.com/${repo}/commit/${data.mainMergeSha}`, target: '_blank', rel: 'noopener noreferrer' }, [data.mainMergeSha]),
-              ]),
-              el('p', { style: 'color:#666;' }, ['Bulk Mode is back off — normal preview builds resume for future edits.']),
-              (data.warnings && data.warnings.length
-                ? el('p', { style: 'color:#a66;' }, [`Warnings: ${data.warnings.join('; ')}`])
-                : el('span', {}, [])),
-            ])
-          );
+          renderPublished(repo, data);
         });
 
         const abandonBtn = el(
@@ -380,7 +406,73 @@
         root.appendChild(container);
       }
 
+      // Shown right after Publish This succeeds. The merge itself is
+      // already done at this point (published/mainMergeSha are real),
+      // but Cloudflare's actual production BUILD for that commit is
+      // still in flight -- this polls for it the same way
+      // renderScratchPreview polls the scratch branch's own preview,
+      // rather than declaring victory the instant the merge API call
+      // returns. No generation-guard needed here (unlike
+      // renderScratchPreview's poll): this is the terminal view for this
+      // whole flow, nothing else can render over it except a fresh
+      // load(), which already bumps generation itself.
+      function renderPublished(repo, data) {
+        const myGeneration = ++generation;
+        const PRODUCTION_STATUS_TEXT = {
+          building: '⏳ Deploying to production…',
+          success: '✅ Live in production',
+          failure: '❌ Production build failed — the merge succeeded, but the site itself didn’t deploy. Check Cloudflare directly.',
+          not_found: '⏳ Waiting for the production build to start…',
+        };
+        const productionRow = el('p', {}, [PRODUCTION_STATUS_TEXT.not_found]);
+
+        root.innerHTML = '';
+        root.appendChild(
+          el('div', { style: 'font:14px -apple-system,sans-serif;padding:24px;max-width:640px;' }, [
+            el('h1', { style: 'font-size:18px;margin:0 0 12px;' }, ['Published']),
+            el('p', {}, [`Combined and published ${data.published.length} entr${data.published.length === 1 ? 'y' : 'ies'}: ${data.published.join(', ')}`]),
+            el('p', {}, [
+              'Commit: ',
+              el('a', { href: `https://github.com/${repo}/commit/${data.mainMergeSha}`, target: '_blank', rel: 'noopener noreferrer' }, [data.mainMergeSha]),
+            ]),
+            productionRow,
+            el('p', { style: 'color:#666;' }, ['Bulk Mode is back off — normal preview builds resume for future edits.']),
+            (data.warnings && data.warnings.length
+              ? el('p', { style: 'color:#a66;' }, [`Warnings: ${data.warnings.join('; ')}`])
+              : el('span', {}, [])),
+          ])
+        );
+
+        (async function poll(attempt) {
+          if (myGeneration !== generation) return;
+          const res = await fetch(`/admin/bulk-publish-api?productionSha=${encodeURIComponent(data.mainMergeSha)}`);
+          if (myGeneration !== generation) return;
+          let production;
+          try {
+            production = (await res.json()).production;
+          } catch (e) {
+            production = null;
+          }
+          if (!production) return; // transient fetch/parse hiccup -- next tick will retry
+
+          productionRow.innerHTML = '';
+          productionRow.appendChild(document.createTextNode(PRODUCTION_STATUS_TEXT[production.status] || production.status));
+          if (production.url) {
+            productionRow.appendChild(document.createTextNode(' — '));
+            productionRow.appendChild(
+              el('a', { href: production.url, target: '_blank', rel: 'noopener noreferrer' }, ['Open →'])
+            );
+          }
+
+          if (production.status === 'building' || production.status === 'not_found') {
+            if (attempt < 24) setTimeout(() => poll(attempt + 1), 5000);
+            else productionRow.appendChild(el('span', { style: 'color:#666;font-size:12px;' }, [' (still building after 2 minutes — check Cloudflare directly)']));
+          }
+        })(0);
+      }
+
       async function load() {
+        generation++; // supersede any poll loop left running from a previous view
         root.innerHTML = '<div style="font:14px -apple-system,sans-serif;padding:24px;">Loading…</div>';
 
         if (!getToken()) {

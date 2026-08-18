@@ -136,6 +136,17 @@ or **Abandon** to discard it and pick a different combination without
 publishing anything — the individual entries stay open either way, so
 abandoning costs nothing.
 
+**The page polls and updates itself, no manual refresh needed**: after
+**Combine & Preview**, it polls the scratch branch's own preview-build
+status every 5 seconds (capped at ~2 minutes) until it settles into
+success/failure, updating in place. After **Publish This**, it polls the
+production deployment for that exact merge commit the same way. Both
+poll loops are guarded against a stale view superseding itself (e.g.
+clicking Abandon or navigating away mid-poll) via a generation counter —
+an in-flight loop checks its own generation before acting or rescheduling
+and silently stops if a newer view has taken over, rather than a dangling
+`setTimeout` writing into a DOM that's moved on.
+
 The Function backing this page lives at `/admin/bulk-publish-api`, not
 the more obvious `/admin/bulk-publish` — deliberately. The static file
 on disk is `public/admin/bulk-publish.html`, and Cloudflare Pages' "clean
